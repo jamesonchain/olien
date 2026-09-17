@@ -311,7 +311,7 @@ const TIERS = [
     price: "Custom",
     unit: "",
     cta: "Contact us",
-    href: "mailto:gkenny896@gmail.com?subject=Olien%20Enterprise",
+    href: "mailto:hello@olien.org?subject=Olien%20Enterprise",
     lead: "Everything in Pro, plus:",
     items: ["Unlimited accounts", "Assisted onboarding", "Custom policies", "Priority support", "Reporting and compliance integrations"],
   },
