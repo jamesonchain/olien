@@ -74,6 +74,14 @@ function fromBase64url(text: string): ArrayBuffer {
   return plain(Uint8Array.from(atob(padded + pad), (char) => char.charCodeAt(0)));
 }
 
+// The relying party a passkey is bound to. WebAuthn defaults it to whatever origin
+// served the page, which means a member who enrolled on a preview URL, or on the old
+// vercel.app host, cannot sign once the console moves to its own domain: a passkey does
+// not travel between domains and there is no migration. Pinning it to the domain that
+// will still be there makes the binding a deployment setting rather than an accident of
+// which URL someone happened to open. Unset locally, where inheriting the origin is right.
+const RP_ID = process.env.NEXT_PUBLIC_PASSKEY_RP_ID?.trim() || undefined;
+
 // WebAuthn takes BufferSource over a plain ArrayBuffer; viem's byte arrays may sit on a shared one.
 function plain(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
@@ -87,7 +95,7 @@ export async function createPasskey(label: string, userHandle: string): Promise<
   const credential = (await navigator.credentials.create({
     publicKey: {
       challenge,
-      rp: { name: "Olien" },
+      rp: RP_ID ? { name: "Olien", id: RP_ID } : { name: "Olien" },
       user: { id: new TextEncoder().encode(userHandle).slice(0, 64), name: userHandle, displayName: label },
       pubKeyCredParams: [{ type: "public-key", alg: -7 }],
       authenticatorSelection: { residentKey: "preferred", userVerification: "required" },
@@ -128,6 +136,9 @@ export async function signWithPasskey(hash: Hex, candidates: PasskeyCandidate[])
   const assertion = (await navigator.credentials.get({
     publicKey: {
       challenge: plain(challenge),
+      // Must name the same relying party the key was made under, or the authenticator
+      // does not recognise it as one of its own.
+      ...(RP_ID ? { rpId: RP_ID } : {}),
       userVerification: "required",
       timeout: 60_000,
       allowCredentials: known.map((record) => ({ type: "public-key" as const, id: fromBase64url(record.credentialId) })),
