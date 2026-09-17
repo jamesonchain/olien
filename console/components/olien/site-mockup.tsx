@@ -4,7 +4,7 @@ import { ArrowDown, ArrowLeftRight, ArrowUp, ChevronDown, ChevronRight } from "l
 // figure can be changed in one place. A made-up treasury with three sub-accounts.
 export function DashboardShot() {
   return (
-    <div className="osite-shot" role="img" aria-label="The Olien console: a treasury dashboard beside the Recourse app showing the same account">
+    <div className="osite-shot" role="img" aria-label="The Olien console: a treasury dashboard beside a phone approving the same account">
       <div className="osite-frame">
       <div className="osite-dash">
         <aside className="osite-dash-side">
