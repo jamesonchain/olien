@@ -41,10 +41,11 @@ else
   "$ROOT/ops/monad-check.sh"
 fi
 
-# RELAYER_PK is the name the Olien service will use once it exists, but service/.env
-# has no such key today, so this falls back to the attestor. Which key pays for the
-# deployment does not change where anything lands: CREATE2 makes every address a
-# function of the salt and the creation code, not of the sender.
+# RELAYER_PK is the name the service reads, and service/.env.example documents it.
+# The attestor stays as a fallback because the testnet deployment shares one key and
+# inventing a second would be ceremony. Which key pays does not change where anything
+# lands: CREATE2 makes every address a function of the salt and the creation code,
+# not of the sender.
 key_from_env() { grep -E "^$1=" "$ROOT/service/.env" 2>/dev/null | cut -d= -f2- | tr -d '"'"'"' ' || true; }
 KEY="${DEPLOY_PK:-}"
 [ -n "$KEY" ] || KEY="$(key_from_env RELAYER_PK)"
