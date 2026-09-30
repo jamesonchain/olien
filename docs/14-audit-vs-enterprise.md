@@ -572,6 +572,20 @@ Olien already prevents (26). Every one of them has a row above.
    new implementation, not an edit, and `setImplementation` behind the delay is how
    every existing account adopts it. Audit v2 once rather than v1 and then v2.
 
+**Phase 1 shipped, 2026-09-30.** The console refuses to create a treasury that any one
+lost key would lock, and warns a live account before a removal or threshold change that
+would leave it that way (C2). A config delay of zero and a recovery delay under a day
+are marked in red where they are set and on the Time lock panel where they stand (M1).
+The fixed-window bound is stated wherever a limit is made or described (H3). New
+treasuries default to a veto threshold of one with the trade-off beside the choice, and
+passkeys hold Veto by default, since they veto through the relayer (H1). A passkey is
+read for its backup-eligible flag at enrolment and named as synced, and a threshold of
+two or more that synced passkeys alone could meet is called out; the service does not
+yet store the flag, which is phase 2 (M6). `ops/olien-hash.mjs` recomputes any
+transaction hash with no dependencies, pinned by `--self-test` to the vectors the
+service pins, and compares it with the account's own view (L4). The rules the screens
+share live in `console/lib/resilience.ts` with their tests.
+
 ## Sources
 
 Vendor documentation and APIs, fetched 2026-09-29. Marketing pages are marked.
