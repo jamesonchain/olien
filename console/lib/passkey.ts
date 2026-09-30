@@ -9,6 +9,10 @@ export interface PasskeyRecord {
   signerId: Hex;
   x: Hex;
   y: Hex;
+  // Backup-eligible at enrolment: the authenticator copies this key to every device on
+  // the same Apple or Google account, so it is not a device. Null when the browser
+  // could not say.
+  synced: boolean | null;
   credentialId: string;
   label: string;
   createdAt: number;
@@ -89,6 +93,16 @@ function plain(bytes: Uint8Array): ArrayBuffer {
   return copy.buffer;
 }
 
+// Byte 32 of the authenticator data holds the flags; bit 3 is BE, backup eligible. The
+// WebAuthn spec puts the security boundary at the cloud account rather than the device,
+// and enrolment is the one moment the authenticator says which side of that line the
+// key is on.
+function backupEligible(response: AuthenticatorAttestationResponse): boolean | null {
+  if (typeof response.getAuthenticatorData !== "function") return null;
+  const data = new Uint8Array(response.getAuthenticatorData());
+  return data.length > 32 ? (data[32] & 0x08) !== 0 : null;
+}
+
 export async function createPasskey(label: string, userHandle: string): Promise<PasskeyRecord> {
   if (!passkeySupported()) throw new Error("This browser cannot create a passkey.");
   const challenge = crypto.getRandomValues(new Uint8Array(32));
@@ -118,6 +132,7 @@ export async function createPasskey(label: string, userHandle: string): Promise<
     signerId: signerIdOfKey(BigInt(x), BigInt(y)),
     x,
     y,
+    synced: backupEligible(response),
     credentialId: base64url(credential.rawId),
     label,
     createdAt: Date.now(),

@@ -50,6 +50,9 @@ export interface SignerInput {
   x?: string;
   y?: string;
   uvRequired?: boolean;
+  // Passkeys only: backup-eligible at enrolment, so it lives in a cloud account rather
+  // than on one device. Sent so the service can keep it once it stores it.
+  synced?: boolean;
   // A Recourse account by name; the service resolves it and picks the kind.
   handle?: string;
 }
