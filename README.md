@@ -94,6 +94,20 @@ NEXT_PUBLIC_OLIEN_CHAIN=monad-testnet npm run build
 | `NEXT_PUBLIC_BACKEND_URL` | Where the service is |
 | `NEXT_PUBLIC_PASSKEY_RP_ID` | Pins the domain a passkey is bound to. Leave it unset locally, where inheriting the origin is right |
 
+**Checking a hash** without the console. The script has no dependencies, not even for
+keccak, so it runs on a machine the console has never touched, and `--self-test` pins it
+to vectors read off a live account before it is trusted with anything.
+
+```sh
+node ops/olien-hash.mjs --self-test
+node ops/olien-hash.mjs --calls proposal.json --rpc https://testnet-rpc.monad.xyz
+```
+
+`proposal.json` is what the service serves at `/api/treasury/accounts/<account>/proposals/<hash>`,
+or a plain list of `{to, value, data}`. With `--rpc` it also asks the account's own
+`getTransactionHash` and says whether every answer agrees; without it, the chain id,
+nonce and epoch come from the file or from flags.
+
 **Checking a chain** before deploying to it. Reads the chain, writes nothing.
 
 ```sh

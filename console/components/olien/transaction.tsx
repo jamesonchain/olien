@@ -586,7 +586,7 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
               <code>{view.txHash}</code>
               <CopyButton value={view.txHash} title="Copy hash" />
             </div>
-            <p className="olien-field-hint">Compare this with your wallet&apos;s hash before signing.</p>
+            <p className="olien-field-hint">Compare this with your wallet&apos;s hash before signing. To check it away from this page, ops/olien-hash.mjs in the repository recomputes it from the calls on any machine with Node.</p>
           </Panel>
           <Panel title="Details">
             <KeyValue
