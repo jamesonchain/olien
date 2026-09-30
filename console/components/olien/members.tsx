@@ -1,11 +1,12 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Lock, Plus, SlidersHorizontal, Trash2 } from "lucide-react";
+import { Lock, Plus, SlidersHorizontal, Trash2, TriangleAlert } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { durationLabel, errorMessage, proposeSigners, proposalSummary, shortAddress, type AccountView, type SignerKind, type SignerView, type SignersProposalBody } from "@/lib/treasury";
+import { keyName, lockedByLosing, lockoutMessage, vetoRule, type Standing } from "@/lib/resilience";
 import { MemberRows, newMember, signerInputOf, usePasskeyMember, validateMembers, type MemberDraft } from "./new-account";
 import { useWalletSession } from "./wallet";
 import { AddressChip, Button, Field, InlineError, Loading, Note, Panel, PermissionTags, plural, StatusPill, Table, Tag } from "./ui";
@@ -19,6 +20,24 @@ function TimeLockNote({ account }: { account: AccountView }) {
   return (
     <Note tone="info" icon={<Lock size={14} />}>
       This change waits {durationLabel(account.configDelay)} after execution and {plural(account.effectiveVetoThreshold, "veto", "vetoes")} stop it.
+    </Note>
+  );
+}
+
+function standingOf(signer: SignerView): Standing {
+  return { key: keyName(signer.label, signer.mine, signer.kind), approve: signer.permissions.includes("approve"), recover: signer.permissions.includes("recover") };
+}
+
+// A live account is warned rather than refused: the change waits behind the time lock
+// and can be vetoed, and the alternative to a fragile shape may be keeping a member
+// who has already left.
+function LockoutNote({ standing, threshold }: { standing: Standing[]; threshold: number }) {
+  const lockout = lockedByLosing(standing, threshold);
+  if (!lockout) return null;
+  const text = lockoutMessage(lockout);
+  return (
+    <Note tone="warn" icon={<TriangleAlert size={14} />}>
+      After this change, {text.charAt(0).toLowerCase() + text.slice(1)}
     </Note>
   );
 }
@@ -114,6 +133,7 @@ function RemoveMemberForm({ address, account, signer, onClose }: { address: stri
           </select>
         </Field>
       ) : null}
+      <LockoutNote standing={account.signers.filter((entry) => entry.signerId !== signer.signerId).map(standingOf)} threshold={threshold} />
       <TimeLockNote account={account} />
       <InlineError message={error} />
       <div className="olien-actions">
@@ -132,6 +152,7 @@ function ThresholdForm({ address, account, onClose }: { address: string; account
   const { propose, busy, error, setError } = useProposeSigners(address);
   const approvers = account.signers.filter((entry) => entry.permissions.includes("approve")).length;
   const vetoers = account.signers.filter((entry) => entry.permissions.includes("veto")).length;
+  const approverVetoers = account.signers.filter((entry) => entry.permissions.includes("approve") && entry.permissions.includes("veto")).length;
   const [threshold, setThreshold] = useState(account.threshold);
   const [vetoThreshold, setVetoThreshold] = useState(account.vetoThreshold);
 
@@ -157,7 +178,7 @@ function ThresholdForm({ address, account, onClose }: { address: string; account
             ))}
           </select>
         </Field>
-        <Field label="Veto threshold" hint={`Automatic is ${account.effectiveVetoThreshold} today: the fewest members holding approve and veto whose refusal makes the threshold unreachable.`}>
+        <Field label="Veto threshold" hint={vetoRule({ vetoThreshold, vetoers, approverVetoers, threshold })}>
           <select className="olien-input olien-input--short" value={vetoThreshold} disabled={busy} onChange={(event) => setVetoThreshold(Number(event.target.value))}>
             <option value={0}>Automatic</option>
             {Array.from({ length: vetoers }, (_, index) => index + 1).map((n) => (
@@ -168,6 +189,7 @@ function ThresholdForm({ address, account, onClose }: { address: string; account
           </select>
         </Field>
       </div>
+      <LockoutNote standing={account.signers.map(standingOf)} threshold={threshold} />
       <TimeLockNote account={account} />
       <InlineError message={error} />
       <div className="olien-actions">

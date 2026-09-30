@@ -81,7 +81,8 @@ cargo run
 | `MEMBERS_URL` | none | An optional directory that resolves `@handle` to an address. Without one, members are named by address |
 | `LOG_CHUNK_BLOCKS` | per chain | How wide one `eth_getLogs` may be. 100 on Monad, 5,000 on Arc |
 
-**Console.** One chain per build.
+**Console.** One chain per build. `npm test` runs the rules the screens share, which
+shapes the wizard refuses and what the warnings say, on Node's own runner; no browser.
 
 ```sh
 cd console && npm install

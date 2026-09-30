@@ -6,6 +6,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
+    "test": "node --test \"lib/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

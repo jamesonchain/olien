@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { createPasskey, friendlyPasskeyError, passkeySupported, type PasskeyRecord } from "@/lib/passkey";
 import { createAccount, durationLabel, errorMessage, isHandle, isValidAddress, shortAddress, type CreateAccountBody, type Permission, type SignerInput } from "@/lib/treasury";
+import { delayWarnings, keyName, lockedByLosing, lockoutMessage, syncedCanMeet, syncedMessage, vetoRule } from "@/lib/resilience";
 import { AddressChip, Button, cx, Disclosure, DurationInput, Field, InlineError, PermissionTags, Spinner, Tag } from "./ui";
 import { olienKeys, rememberAccount } from "./use-olien";
 import { useWalletSession } from "./wallet";
@@ -27,6 +28,8 @@ export interface MemberDraft {
   x?: string;
   y?: string;
   signerId?: string;
+  // Backup-eligible: the authenticator syncs it across a cloud account.
+  synced?: boolean | null;
 }
 
 export interface PasskeyAdder {
@@ -42,15 +45,17 @@ export function newMember(partial: Partial<MemberDraft> = {}): MemberDraft {
   return { key: draftSequence, kind: "ecdsa", address: "", label: "", approve: true, veto: true, recover: false, ...partial };
 }
 
-// A passkey cannot send a veto transaction by itself (that needs a wallet with gas), so
-// it starts as an approver only; the toggles are still there for teams that want more.
-export function newPasskeyMember(record: PasskeyRecord, label: string): MemberDraft {
-  return newMember({ kind: "webauthn", label, approve: true, veto: false, x: record.x, y: record.y, signerId: record.signerId });
+// A passkey vetoes through a user operation the relayer submits, so it starts with the
+// same permissions as a wallet. Its default name says what the authenticator said about
+// it, since that is the one fact about a passkey the other members cannot see.
+export function newPasskeyMember(record: PasskeyRecord): MemberDraft {
+  const label = record.synced ? "Synced passkey" : "Passkey on this device";
+  return newMember({ kind: "webauthn", label, approve: true, veto: true, x: record.x, y: record.y, signerId: record.signerId, synced: record.synced });
 }
 
 export function signerInputOf(row: MemberDraft, fallbackLabel: string): SignerInput {
   const label = row.label.trim() || fallbackLabel;
-  if (row.kind === "webauthn") return { kind: "webauthn", label, permissions: permissionsOf(row), x: row.x, y: row.y, uvRequired: true };
+  if (row.kind === "webauthn") return { kind: "webauthn", label, permissions: permissionsOf(row), x: row.x, y: row.y, uvRequired: true, synced: row.synced ?? undefined };
   // A Recourse account by @handle: the service resolves it and decides whether it is
   // a Safe (a contract signer) or a plain key, and labels it by the handle unless told.
   if (!isValidAddress(row.address)) return { kind: "ecdsa", handle: row.address.trim().replace(/^@/, ""), label: row.label.trim() || row.address.trim(), permissions: permissionsOf(row) };
@@ -68,7 +73,7 @@ export function usePasskeyMember(onAdd: (draft: MemberDraft) => void, userHandle
     add: () => {
       setBusy(true);
       void createPasskey("Passkey on this device", userHandle ?? "olien")
-        .then((record) => onAdd(newPasskeyMember(record, "Passkey on this device")))
+        .then((record) => onAdd(newPasskeyMember(record)))
         .catch((cause) => onError(friendlyPasskeyError(cause)))
         .finally(() => setBusy(false));
     },
@@ -129,7 +134,7 @@ export function MemberRows({
             <div className="olien-field">
               <span className="olien-field-label">Passkey {index + 1}</span>
               <span className="olien-passkey-row">
-                <Tag tone="accent">Passkey</Tag>
+                <Tag tone="accent">{row.synced ? "Synced passkey" : "Passkey"}</Tag>
                 <code title={row.signerId}>{row.signerId ? `${row.signerId.slice(0, 10)}…${row.signerId.slice(-4)}` : ""}</code>
               </span>
             </div>
@@ -157,7 +162,7 @@ export function MemberRows({
           </Button>
           <span className="olien-field-hint">
             {passkey.supported
-              ? "Touch ID or Face ID on this device will sign for it. A passkey approves; it cannot send a veto on its own."
+              ? "Touch ID or Face ID signs for it and the relayer pays its gas. A passkey synced to an Apple or Google account lives on every device signed into that account."
               : "This browser cannot create passkeys."}
           </span>
         </div>
@@ -206,7 +211,10 @@ export function OlienNewAccount() {
   const [name, setName] = useState("");
   const [members, setMembers] = useState<MemberDraft[]>(() => [newMember({ address: walletAddress ?? "", label: "Me" })]);
   const [threshold, setThreshold] = useState(1);
-  const [vetoThreshold, setVetoThreshold] = useState(0);
+  // One by default: any member can stop a rule change while it waits, and cannot stop
+  // money or their own removal, so the griefing that makes one unsafe elsewhere is
+  // excluded here. Automatic stays available for teams that want the quorum to decide.
+  const [vetoThreshold, setVetoThreshold] = useState(1);
   const [configDelay, setConfigDelay] = useState(DAY);
   const [recoveryDelay, setRecoveryDelay] = useState(2 * DAY);
   const [recoveryCoSignDelay, setRecoveryCoSignDelay] = useState(HOUR);
@@ -219,6 +227,17 @@ export function OlienNewAccount() {
   const recoverers = members.filter((row) => row.recover).length;
   const stepIndex = STEPS.findIndex((entry) => entry.id === step);
   const boundedThreshold = Math.min(Math.max(1, threshold), Math.max(1, approvers));
+  const approverVetoers = members.filter((row) => row.approve && row.veto).length;
+  const isMine = (row: MemberDraft) => Boolean(walletAddress && row.kind === "ecdsa" && row.address.toLowerCase() === walletAddress.toLowerCase());
+  const lockout = lockedByLosing(
+    members.map((row, index) => ({ key: keyName(row.label.trim() || `Member ${index + 1}`, isMine(row), row.kind), approve: row.approve, recover: row.recover })),
+    boundedThreshold,
+  );
+  const syncedAlone = syncedCanMeet(members, boundedThreshold);
+  // Nobody holds Veto: the contract refuses an explicit threshold above the vetoer
+  // count, and the review screen says why the choice is moot.
+  const vetoChoice = vetoers === 0 ? 0 : vetoThreshold;
+  const delayWarning = delayWarnings({ configDelay, recoveryDelay, recoverers });
 
   function patch(key: number, change: Partial<MemberDraft>) {
     setMembers((current) => current.map((row) => (row.key === key ? { ...row, ...change } : row)));
@@ -234,13 +253,16 @@ export function OlienNewAccount() {
       const problem = validateMembers(members);
       if (problem) return setError(problem);
       if (approvers === 0) return setError("At least one member must be able to approve.");
+      // Refused rather than warned: at creation there is nothing to lose by fixing it,
+      // and a treasury one lost laptop can brick is not one this console will make.
+      if (lockout) return setError(lockoutMessage(lockout));
       setThreshold(boundedThreshold);
       setStep("review");
     }
   }
 
   function body(): CreateAccountBody | string {
-    if (vetoThreshold < 0 || (vetoThreshold > 0 && vetoThreshold > vetoers)) return `The veto threshold must be automatic or at most ${vetoers}, the number of members that can veto.`;
+    if (vetoChoice < 0 || (vetoChoice > 0 && vetoChoice > vetoers)) return `The veto threshold must be automatic or at most ${vetoers}, the number of members that can veto.`;
     for (const [label, seconds] of [
       ["config delay", configDelay],
       ["recovery delay", recoveryDelay],
@@ -253,7 +275,7 @@ export function OlienNewAccount() {
       name: name.trim(),
       signers: members.map((row, index) => signerInputOf(row, `Member ${index + 1}`)),
       threshold: boundedThreshold,
-      vetoThreshold,
+      vetoThreshold: vetoChoice,
       configDelay,
       recoveryDelay,
       recoveryCoSignDelay,
@@ -350,9 +372,14 @@ export function OlienNewAccount() {
                 {boundedThreshold} of {approvers} {approvers === 1 ? "member" : "members"} with approve must sign before a transaction runs.
               </p>
             </div>
-            {members.length === 1 ? (
+            {lockout ? (
               <p className="olien-wiz-warn">
-                <TriangleAlert size={14} /> Add another member as a backup. Losing access to your wallet would lose access to the Olien&apos;s money.
+                <TriangleAlert size={14} /> {lockoutMessage(lockout)}
+              </p>
+            ) : null}
+            {syncedAlone ? (
+              <p className="olien-wiz-warn">
+                <TriangleAlert size={14} /> {syncedMessage(syncedAlone)}
               </p>
             ) : null}
             <InlineError message={error} />
@@ -397,8 +424,16 @@ export function OlienNewAccount() {
             </div>
           </div>
           <p className="olien-wiz-fine">
-            <Info size={13} /> The relayer pays the deployment. The address is predicted from the members and a random salt, and the account can take deposits the moment it exists. Changes to members or rules wait {durationLabel(configDelay)}.
+            <Info size={13} /> The relayer pays the deployment. The address is predicted from the members and a random salt, and the account can take deposits the moment it exists.{" "}
+            {configDelay === 0
+              ? "Changes to members or rules take effect the moment the threshold approves them."
+              : `Changes to members or rules wait ${durationLabel(configDelay)}. ${vetoRule({ vetoThreshold: vetoChoice, vetoers, approverVetoers, threshold: boundedThreshold })}`}
           </p>
+          {delayWarning.configDelay ? (
+            <p className="olien-wiz-warn">
+              <TriangleAlert size={14} /> {delayWarning.configDelay}
+            </p>
+          ) : null}
           <ul className="olien-wiz-members">
             {members.map((row, index) => (
               <li key={row.key}>
@@ -406,15 +441,15 @@ export function OlienNewAccount() {
                   <strong>{row.label.trim() || `Member ${index + 1}`}</strong>
                   {walletAddress && row.address.toLowerCase() === walletAddress.toLowerCase() ? <Tag tone="accent">You</Tag> : null}
                 </span>
-                {row.kind === "webauthn" ? <Tag tone="accent">Passkey</Tag> : <AddressChip address={row.address} />}
+                {row.kind === "webauthn" ? <Tag tone="accent">{row.synced ? "Synced passkey" : "Passkey"}</Tag> : <AddressChip address={row.address} />}
                 <PermissionTags permissions={permissionsOf(row)} />
               </li>
             ))}
           </ul>
           <Disclosure summary="Advanced">
             <div className="olien-form-grid">
-              <Field label="Veto threshold" hint="Automatic derives it from the threshold: the fewest members holding approve and veto whose refusal makes the threshold unreachable.">
-                <select className="olien-input olien-input--short" value={vetoThreshold} disabled={creating} onChange={(event) => setVetoThreshold(Number(event.target.value))}>
+              <Field label="Veto threshold" hint={vetoRule({ vetoThreshold: vetoChoice, vetoers, approverVetoers, threshold: boundedThreshold })}>
+                <select className="olien-input olien-input--short" value={vetoChoice} disabled={creating || vetoers === 0} onChange={(event) => setVetoThreshold(Number(event.target.value))}>
                   <option value={0}>Automatic</option>
                   {Array.from({ length: vetoers }, (_, index) => index + 1).map((n) => (
                     <option key={n} value={n}>
@@ -423,10 +458,10 @@ export function OlienNewAccount() {
                   ))}
                 </select>
               </Field>
-              <Field label="Config delay" hint={`Member, threshold and time lock changes wait ${durationLabel(configDelay)} after execution and can be vetoed meanwhile.`}>
+              <Field label="Config delay" hint={`Member, threshold and time lock changes wait ${durationLabel(configDelay)} after execution and can be vetoed meanwhile.`} error={delayWarning.configDelay}>
                 <DurationInput value={configDelay} disabled={creating} onChange={setConfigDelay} />
               </Field>
-              <Field label="Recovery delay" hint={`A recovery by a recover member alone waits ${durationLabel(recoveryDelay)}. At least 1 hour when a recover member exists.`}>
+              <Field label="Recovery delay" hint={`A recovery by a recover member alone waits ${durationLabel(recoveryDelay)}. At least 1 hour when a recover member exists.`} error={delayWarning.recoveryDelay}>
                 <DurationInput value={recoveryDelay} disabled={creating} onChange={setRecoveryDelay} />
               </Field>
               <Field label="Recovery co-sign delay" hint={`A recovery co-signed by an approver waits ${durationLabel(recoveryCoSignDelay)}.`}>

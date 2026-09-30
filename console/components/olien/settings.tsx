@@ -1,7 +1,7 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowDownLeft, ArrowUpRight, Download, KeyRound, Lock, Plus, Radio, Send, Trash2 } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, Download, KeyRound, Lock, Plus, Radio, Send, Trash2, TriangleAlert } from "lucide-react";
 import { useSendTransaction } from "wagmi";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -51,6 +51,7 @@ import { AddressInput } from "./recipients";
 import { friendlyWalletError, useOlienChain, useWalletSession, walletSigner } from "./wallet";
 import { chainName, chainSpec } from "@/lib/chain";
 import { friendlyPasskeyError, knownPasskeys, passkeySupported, signWithPasskey } from "@/lib/passkey";
+import { delayWarnings } from "@/lib/resilience";
 
 const HOUR = 3_600;
 const DAY = 86_400;
@@ -109,6 +110,8 @@ function TimeLockSection({ address, account }: { address: string; account: Accou
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const recoverers = account.signers.filter((signer) => signer.permissions.includes("recover")).length;
+  const warnings = delayWarnings({ configDelay, recoveryDelay, recoverers });
+  const live = delayWarnings({ configDelay: account.configDelay, recoveryDelay: account.recoveryDelay, recoverers });
 
   async function submit() {
     setError(null);
@@ -136,20 +139,27 @@ function TimeLockSection({ address, account }: { address: string; account: Accou
       }
     >
       {!editing ? (
-        <KeyValue
-          items={[
-            { label: "Config delay", value: durationLabel(account.configDelay) },
-            { label: "Recovery delay", value: durationLabel(account.recoveryDelay) },
-            { label: "Recovery co-sign delay", value: durationLabel(account.recoveryCoSignDelay) },
-          ]}
-        />
+        <>
+          <KeyValue
+            items={[
+              { label: "Config delay", value: durationLabel(account.configDelay) },
+              { label: "Recovery delay", value: durationLabel(account.recoveryDelay) },
+              { label: "Recovery co-sign delay", value: durationLabel(account.recoveryCoSignDelay) },
+            ]}
+          />
+          {live.configDelay || live.recoveryDelay ? (
+            <Note tone="warn" icon={<TriangleAlert size={14} />}>
+              {[live.configDelay, live.recoveryDelay].filter(Boolean).join(" ")}
+            </Note>
+          ) : null}
+        </>
       ) : (
         <>
           <div className="olien-form-grid">
-            <Field label="Config delay" hint="Member, threshold and time lock changes wait this long after execution.">
+            <Field label="Config delay" hint="Member, threshold and time lock changes wait this long after execution." error={warnings.configDelay}>
               <DurationInput value={configDelay} disabled={busy} onChange={setConfigDelay} />
             </Field>
-            <Field label="Recovery delay" hint="A recovery by a recover member alone waits this long. At least 1 hour when a recover member exists.">
+            <Field label="Recovery delay" hint="A recovery by a recover member alone waits this long. At least 1 hour when a recover member exists." error={warnings.recoveryDelay}>
               <DurationInput value={recoveryDelay} disabled={busy} onChange={setRecoveryDelay} />
             </Field>
             <Field label="Recovery co-sign delay" hint="A recovery co-signed by an approver waits this long.">
@@ -219,7 +229,7 @@ function LimitForm({ address, account, onClose }: { address: string; account: Ac
         <Field label="Amount (USDC)">
           <input className="olien-input num" value={amount} inputMode="decimal" placeholder="500.00" disabled={busy} onChange={(event) => setAmount(event.target.value)} />
         </Field>
-        <Field label="Period">
+        <Field label="Period" hint={period === 0 ? "Spent once; nothing refills." : "Refills in full when the window resets, whatever was spent just before it, so the true cap across one reset is twice the amount."}>
           <select className="olien-input" value={period} disabled={busy} onChange={(event) => setPeriod(Number(event.target.value))}>
             {PERIODS.map((entry) => (
               <option key={entry.seconds} value={entry.seconds}>
@@ -501,7 +511,7 @@ function LimitsSection({ address, account }: { address: string; account: Account
         ) : null
       }
     >
-      <p className="olien-panel-lead">A named member pays alone up to the amount per period, without the threshold. Creating one is a configuration change behind the time lock; removing one runs at once.</p>
+      <p className="olien-panel-lead">A named member pays alone up to the amount per period, without the threshold. The period is a fixed window that refills on a clock, so across one reset up to twice the amount can move. Creating one is a configuration change behind the time lock; removing one runs at once.</p>
       {creating ? <LimitForm address={address} account={account} onClose={() => setCreating(false)} /> : null}
       {account.limits.length === 0 ? (
         <EmptyState title="No spending limits" hint="Every payment needs the threshold until a limit names a member." />
