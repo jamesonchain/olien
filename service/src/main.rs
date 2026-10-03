@@ -8,6 +8,7 @@
 
 mod app;
 mod auth;
+mod canonical;
 mod config;
 mod indexer;
 mod members;
@@ -58,6 +59,9 @@ async fn main() -> Result<()> {
 
     treasury::set_chain_usdc(config.usdc);
     let treasury = build_treasury(&config)?;
+    if let Some(client) = treasury.client.clone() {
+        hold_to_v1(client).await?;
+    }
 
     if treasury.client.is_some() {
         let pool = pool.clone();
@@ -91,6 +95,48 @@ async fn main() -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+/// Refuses to start against anything but Olien v1, and keeps asking when the chain
+/// cannot be read.
+///
+/// A wrong address or wrong code is definitive and stops the boot. An unreachable RPC
+/// is not: it says nothing about what is on the chain, and failing on it would turn an
+/// RPC outage into a restart loop. So the service starts, a task asks again every half
+/// minute, and the first definite answer either settles it or ends the process.
+/// OLIEN_SKIP_CODE_CHECK exists for a local chain carrying a build of one's own.
+async fn hold_to_v1(client: OlienClient) -> Result<()> {
+    if std::env::var("OLIEN_SKIP_CODE_CHECK").is_ok_and(|v| !v.trim().is_empty()) {
+        tracing::warn!("OLIEN_SKIP_CODE_CHECK is set: the contracts were not checked against Olien v1");
+        return Ok(());
+    }
+    match canonical::verify(&client).await {
+        canonical::Verdict::Verified => {
+            tracing::info!("the four contracts are Olien v1, by address and by code");
+            Ok(())
+        }
+        canonical::Verdict::Mismatch(reason) => anyhow::bail!("refusing to start: {reason}"),
+        canonical::Verdict::Unreachable(reason) => {
+            tracing::warn!("the contracts could not be checked yet ({reason}); starting, and asking again");
+            actix_web::rt::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    match canonical::verify(&client).await {
+                        canonical::Verdict::Verified => {
+                            tracing::info!("the four contracts are Olien v1, by address and by code");
+                            return;
+                        }
+                        canonical::Verdict::Mismatch(reason) => {
+                            tracing::error!("stopping: {reason}");
+                            std::process::exit(1);
+                        }
+                        canonical::Verdict::Unreachable(_) => {}
+                    }
+                }
+            });
+            Ok(())
+        }
+    }
 }
 
 /// The relayer pays for account creation and for every execution, so without a key this

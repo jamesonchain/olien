@@ -57,6 +57,12 @@ contract OlienCanonicalTest is Test {
         deployed = address(bytes20(out));
         assertEq(deployed, recorded, string.concat(name, ": deployed somewhere other than the recorded address"));
         assertGt(deployed.code.length, 0, string.concat(name, ": no code after deploying"));
+        // The hash the service checks at boot, and the readiness scripts check on a chain.
+        assertEq(
+            keccak256(deployed.code),
+            vm.parseJsonBytes32(book, string.concat(".contracts.", name, ".runtimeCodeHash")),
+            string.concat(name, ": the recorded runtime hash is not the hash of what the bytes deploy")
+        );
     }
 
     /// The hash of runtime code without the compiler's trailing metadata, whose last two
@@ -148,6 +154,7 @@ contract OlienCanonicalTest is Test {
             "the proxy's source has moved from what the deployed factory makes"
         );
         assertEq(Olien(payable(account)).getConfig().threshold, 1, "the new account is not initialised");
+        assertEq(keccak256(account.code), vm.parseJsonBytes32(book, ".accountCodeHash"), "an account's code is not the recorded account code");
 
         // The deployed account is wired to the pieces deployed beside it, and the factory to it.
         assertEq(Olien(payable(implementation)).ENTRY_POINT(), entryPoint);

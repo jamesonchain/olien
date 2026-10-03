@@ -765,6 +765,13 @@ impl OlienClient {
         Ok(!code.is_empty())
     }
 
+    /// The hash of the code at an address, the way the chain's EXTCODEHASH gives it
+    /// for an address that has code.
+    pub async fn code_hash(&self, address: Address) -> Result<B256> {
+        let code = self.provider.get_code_at(address).await.context("reading code")?;
+        Ok(keccak256(&code))
+    }
+
     pub async fn block_timestamp(&self, number: u64) -> Result<u64> {
         let block = self
             .provider
