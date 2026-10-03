@@ -14,7 +14,7 @@ they land.
 | --- | --- |
 | `contracts/src/olien/**` | `contracts/src/**` |
 | `contracts/test/olien/**` | `contracts/test/**` |
-| `contracts/script/DeployOlien.s.sol` | `contracts/script/Deploy.s.sol` |
+| `contracts/script/DeployOlien.s.sol` | `contracts/script/Deploy.s.sol`, removed 2026-10-04: moving the sources changed the creation code, so v1 deploys from `deployments/v1/creation.json` through `ops/deploy-olien.sh` (audit L11) |
 | `contracts/foundry.toml`, `contracts/lib/**`, `contracts/remappings.txt` | same (the `compilation_restrictions` for the via-IR path come along) |
 | `backend/src/services/olien.rs`, `treasury.rs`, `treasury_keys.rs`, `treasury_cheques.rs`, `payroll.rs`, `webhooks.rs` | `service/src/**` |
 | `backend/src/jobs/olien_indexer.rs` | `service/src/indexer.rs` |

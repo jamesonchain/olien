@@ -684,8 +684,10 @@ The four contracts deploy through the Arachnid CREATE2 proxy
 (`olien.v1.verifier`, `olien.v1.sub-account`, `olien.v1.implementation`,
 `olien.v1.factory`), so their addresses are the same on Arc testnet, Arc mainnet
 and any chain with that deployer and EntryPoint v0.7
-(`0x0000000071727De22E5E9d8BAf0edAc6f37da032`). Script:
-`contracts/script/DeployOlien.s.sol`; addresses are written to
+(`0x0000000071727De22E5E9d8BAf0edAc6f37da032`). The same addresses need the same
+creation code, and the compiler ends that with a hash of the source paths, so v1 is
+deployed from the bytes pinned in `deployments/v1/creation.json` by
+`ops/deploy-olien.sh`, never by recompiling; addresses are recorded in
 `deployments/<chain>.json` under `olien`.
 
 | Contract | Address (Arc testnet, 2026-09-04) | Deployment | Arc mainnet |
