@@ -42,10 +42,11 @@ Credit first, because most of this list would be findings against other products
   bit to flip. The implementation moves only through `setImplementation` behind
   `configDelay` and the veto, or never after `freezeImplementation`
   (`contracts/src/Olien.sol:449`).
-- **The console refuses to sign a hash it did not compute.** It rebuilds the typed
-  data, hashes it, and stops with "Hash mismatch, not signing" if the proposal's
-  hash differs (`console/components/olien/transaction.tsx:296`). That is the
-  Radiant and Bybit lesson implemented where it matters, in the signer's own client.
+- **The console signs only what it built, over calls it decoded itself.** True since
+  2026-10-04, and not before. When this audit was first written the console did
+  rebuild the typed data and refuse a mismatched hash, and this list credited it with
+  the Radiant and Bybit lesson for that. It had half of it: the hash was checked and
+  the screen was not. See C0, which is the largest thing the first pass missed.
 - **Canonical signatures only.** Both curves reject high-s (`Olien.sol:74`,
   `OlienVerifier.sol:38`), so a malleated signature cannot be replayed as a
   different one.
@@ -70,6 +71,66 @@ Severity is about money, not code style. Critical means a plausible path to loss
 lock-up under the product's own threat model. High means a control every serious
 vendor has and this one lacks. Medium means the design promises it and the code does
 not deliver. Low is hygiene.
+
+### C0. The signing screen showed the proposer's description, not the calldata
+
+*Found 2026-10-04 while starting phase 2. Fixed in the console the same day and live
+on olien.org; the service half is committed and not yet deployed (see §6).*
+
+**What.** For a payment, the transaction page showed the recipient, the amount and
+the label from `intent.recipients`, the free-form description stored beside a
+proposal. The generic route `POST /proposals` kept any intent with any calls, from
+any member and from any API key scoped to `propose`. The hash check compared the
+typed data with `txHash` and never compared either with what was on the screen. So a
+proposal could read "250 USDC to Acme Ltd", pay any address any amount, and pass
+every check the console made. A passkey shows its holder nothing, so for a passkey
+member the screen was the whole of what they knew.
+
+The same trust ran through every other signature. A cheque signed the typed data and
+the hash the service supplied; the account answers ERC-1271 for any `Message(hash)`
+and a passkey signs a bare hash, so the supplied hash did not even have to be a
+cheque's. A veto and a limit spend by passkey signed the operation hash as given. A
+veto and a spend by wallet sent the service's `to` and `data`. The EIP-712 domain
+came with the proposal, so one built for another account the member also signs for
+would have been signed from this account's page. The sign-in text was whatever the
+service returned.
+
+**Evidence.** At `473446d`: `console/components/olien/transaction.tsx:41` reads
+`view.intent.recipients` and line 498 renders it; `:178` and `:313` hand a passkey a
+hash from the service; `payroll.tsx:281` and `:301`; `settings.tsx:343` and `:361`;
+`wallet.tsx:41`. `service/src/treasury.rs` `create_proposal` passed `body.intent`
+through unchanged. `console/lib/signing-surface.test.ts` fails on exactly those
+eleven lines when run against that commit.
+
+**Why it matters.** This is the Bybit attack without needing to compromise anything:
+the signers' own interface displayed a description an attacker wrote, and a leaked
+payroll key was enough to write one. The first version of this document said in M2
+that "the decoding is in the client". It was not. That sentence came from the
+security model and was not read in the code, which is the method this document
+claims for itself and did not follow there.
+
+**Fix.** `console/lib/signing.ts` builds everything a member signs from what the
+screen shows, and compares what the service sent instead of using it. Calls are
+decoded from the message that is hashed, and a decode counts only when encoding it
+again gives the same bytes. The domain is the console's own chain and the account in
+the address bar. The intent attaches a label or a memo to a payment only when it
+agrees with that payment exactly; when it contradicts the calldata it is shown
+nowhere and approving is switched off. An unreadable call, an upgrade, a frozen
+implementation, a zero delay and an allowance each need the member to say they have
+read it before Approve appears. A cheque's digest is derived from the row. An
+operation is checked to be the one call that was asked for, on this account, for at
+most two hours at a bounded fee, and its hash is computed locally. The hashing is
+pinned to the vectors the contract and the service pin. In the service, `describes()`
+refuses a kind or an intent that contradicts the calls before it is stored.
+
+**What remains.** A hostile service can no longer change what a member signs. It can
+still leave things out: the console lists the proposals and scheduled changes the
+service lists, so a scheduled change it hides is one nobody vetoes. The account does
+not enumerate its scheduled hashes, so the console cannot rebuild that list from the
+chain without an indexer of its own; a v2 view that lists them closes it, and until
+then an independent watcher on the `Scheduled` event is the defence. Signer labels
+are also still the service's, which is why a rule change is shown by address and id
+and never by label.
 
 ### C1. Money moves instantly at any size, and nothing can brake it
 
@@ -230,8 +291,9 @@ verdict; the console shows that verdict and otherwise "Not simulated yet."
 
 **Why it matters.** The security model's own "What a compromise yields" row says a
 hostile service can "propose calldata with a misleading label" and that the defence
-is decoding and simulation *in the client*. The decoding is in the client. The
-simulation is not. Security Alliance's guidance, which the model adopts, is that at
+is decoding and simulation *in the client*. The decoding is in the client since C0's
+fix and was not before it. The simulation still is not, and the page now says the
+result is the service's rather than printing "Simulation passed". Security Alliance's guidance, which the model adopts, is that at
 least two signers simulate independently because simulations can be spoofed.
 
 **Recommendation.** An `eth_call` from the browser against the account, through the
@@ -585,6 +647,24 @@ yet store the flag, which is phase 2 (M6). `ops/olien-hash.mjs` recomputes any
 transaction hash with no dependencies, pinned by `--self-test` to the vectors the
 service pins, and compares it with the account's own view (L4). The rules the screens
 share live in `console/lib/resilience.ts` with their tests.
+
+**Found on the way into phase 2, 2026-10-04.** C0 above, fixed. And the console's
+links: twenty-six of them, the ones built from a template with the address in them,
+still pointed at `/olien/...`, the path the console had inside another application,
+so the sidebar, the account list and every transaction link were a 404 on olien.org
+from 17 September. Fixed, with a test that reads the source for the old prefix.
+
+**The service in this repository is not the one that is running.** olien.org's
+console talks to `olien-monad-testnet-production.up.railway.app`, and that is the
+Recourse backend, built from the Recourse repository and pointed at Monad: its
+`/health` carries that backend's own fields. `service/` here has never been
+deployed. So every service-side item in this document, C0's guard and the Monad USDC
+fix included, is committed and not live, and the backend that is live has C0's hole
+on the proposing side. Moving over needs a container build for this crate, a Railway
+service built from this repository, and a decision about the database: its migration
+table records that backend's twenty-five migrations, this crate carries eight with
+different contents, and sqlx refuses to boot on the difference. That decision comes
+before the rest of phase 2, because nothing else in phase 2 reaches a user without it.
 
 ## Sources
 
