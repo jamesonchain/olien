@@ -63,6 +63,21 @@ pub struct ApiKeyView {
     pub created_by: String,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
+    /// The last moment the key works. A key past it stays listed, so whoever comes
+    /// looking for why the payroll job stopped finds the reason beside the name.
+    pub expires_at: Option<i64>,
+}
+
+/// A key lives ninety days unless its minter says otherwise, and never more than a year.
+pub const DEFAULT_LIFETIME_DAYS: i32 = 90;
+pub const MAX_LIFETIME_DAYS: i32 = 365;
+
+pub fn lifetime_days(requested: Option<u32>) -> Res<i32> {
+    match requested {
+        None => Ok(DEFAULT_LIFETIME_DAYS),
+        Some(days) if (1..=MAX_LIFETIME_DAYS as u32).contains(&days) => Ok(days as i32),
+        Some(_) => Err(bad(format!("a key lasts between 1 and {MAX_LIFETIME_DAYS} days"))),
+    }
 }
 
 /// The one response that carries the key itself.
@@ -127,6 +142,7 @@ struct KeyRow {
     created_by: i64,
     created_at: DateTime<Utc>,
     last_used_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
 }
 
 async fn view_of(pool: &PgPool, row: KeyRow) -> Res<ApiKeyView> {
@@ -139,6 +155,7 @@ async fn view_of(pool: &PgPool, row: KeyRow) -> Res<ApiKeyView> {
         created_by: member_name(pool, row.created_by).await?,
         created_at: row.created_at.timestamp(),
         last_used_at: row.last_used_at.map(|t| t.timestamp()),
+        expires_at: row.expires_at.map(|t| t.timestamp()),
     })
 }
 
@@ -157,7 +174,7 @@ pub(crate) async fn member_name(pool: &PgPool, id: i64) -> Res<String> {
 pub async fn list_keys(pool: &PgPool, user: i64, address: &str) -> Res<Vec<ApiKeyView>> {
     let ctx = context_for(pool, user, address).await?;
     let rows: Vec<KeyRow> = sqlx::query_as(
-        "SELECT id, name, scope, hint, created_by, created_at, last_used_at FROM olien_api_keys
+        "SELECT id, name, scope, hint, created_by, created_at, last_used_at, expires_at FROM olien_api_keys
          WHERE olien_id = $1 AND revoked_at IS NULL ORDER BY created_at",
     )
     .bind(ctx.row.id)
@@ -170,18 +187,19 @@ pub async fn list_keys(pool: &PgPool, user: i64, address: &str) -> Res<Vec<ApiKe
     Ok(views)
 }
 
-pub async fn mint_key(pool: &PgPool, user: i64, address: &str, name: &str, scope: &str) -> Res<MintedKey> {
+pub async fn mint_key(pool: &PgPool, user: i64, address: &str, name: &str, scope: &str, expires_in_days: Option<u32>) -> Res<MintedKey> {
     let ctx = context_for(pool, user, address).await?;
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 80 {
         return Err(bad("a key needs a name of up to 80 characters"));
     }
     let scope = Scope::parse(scope)?;
+    let days = lifetime_days(expires_in_days)?;
     let key = mint();
     let row: KeyRow = sqlx::query_as(
-        "INSERT INTO olien_api_keys (olien_id, name, scope, key_hash, hint, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, name, scope, hint, created_by, created_at, last_used_at",
+        "INSERT INTO olien_api_keys (olien_id, name, scope, key_hash, hint, created_by, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, now() + make_interval(days => $7))
+         RETURNING id, name, scope, hint, created_by, created_at, last_used_at, expires_at",
     )
     .bind(ctx.row.id)
     .bind(name)
@@ -189,6 +207,7 @@ pub async fn mint_key(pool: &PgPool, user: i64, address: &str, name: &str, scope
     .bind(hash_of(&key))
     .bind(hint_of(&key))
     .bind(user)
+    .bind(days)
     .fetch_one(pool)
     .await?;
     Ok(MintedKey { key, view: view_of(pool, row).await? })
@@ -208,14 +227,14 @@ pub async fn revoke_key(pool: &PgPool, user: i64, address: &str, id: i64) -> Res
     Ok(())
 }
 
-/// The bearer token to the grant behind it, or None for a key that does not exist or
-/// was revoked. The account's address is returned lowercased so the handler can hold
+/// The bearer token to the grant behind it, or None for a key that does not exist, was
+/// revoked or has passed its last day. The account's address is returned lowercased so the handler can hold
 /// it against the path.
 pub async fn resolve(pool: &PgPool, token: &str) -> Res<Option<KeyGrant>> {
     let found: Option<(i64, i64, String, String)> = sqlx::query_as(
         "UPDATE olien_api_keys k SET last_used_at = now()
          FROM olien_accounts a
-         WHERE k.key_hash = $1 AND k.revoked_at IS NULL AND a.id = k.olien_id
+         WHERE k.key_hash = $1 AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > now()) AND a.id = k.olien_id
          RETURNING k.id, k.created_by, a.address, k.scope",
     )
     .bind(hash_of(token))
@@ -279,6 +298,15 @@ mod tests {
         let elsewhere = Some("0x00000000000000000000000000000000000000cd");
         assert_eq!(permit(&g, Need::Read, elsewhere).unwrap_err().1, "this API key belongs to a different account");
         assert!(permit(&g, Need::Read, None).is_err(), "a route with no account in it is a person's route");
+    }
+
+    #[test]
+    fn a_key_lasts_ninety_days_unless_told_and_never_more_than_a_year() {
+        assert_eq!(lifetime_days(None).unwrap(), 90);
+        assert_eq!(lifetime_days(Some(7)).unwrap(), 7);
+        assert_eq!(lifetime_days(Some(365)).unwrap(), 365);
+        assert!(lifetime_days(Some(0)).is_err(), "a key that is already over");
+        assert!(lifetime_days(Some(366)).is_err(), "a key that outlives the year");
     }
 
     #[test]

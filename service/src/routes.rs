@@ -152,6 +152,17 @@ pub async fn create_account(
     reply(treasury::create_account(pool.get_ref(), service.get_ref(), user, body.into_inner()).await)
 }
 
+/// POST /api/treasury/accounts/import - open an Olien that already exists on the chain.
+pub async fn import_account(
+    pool: web::Data<PgPool>,
+    service: web::Data<Treasury>,
+    req: HttpRequest,
+    body: web::Json<treasury::ImportBody>,
+) -> HttpResponse {
+    let user = who!(pool, req);
+    reply(treasury::import_account(pool.get_ref(), service.get_ref(), user, body.into_inner()).await)
+}
+
 pub async fn get_account(pool: web::Data<PgPool>, service: web::Data<Treasury>, req: HttpRequest, path: web::Path<String>) -> HttpResponse {
     let user = who_on!(pool, req, Need::Read, &path).user;
     reply(treasury::account_view(pool.get_ref(), service.get_ref(), user, &path).await)
@@ -377,9 +388,12 @@ pub async fn add_address(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NewKeyBody {
     pub name: String,
     pub scope: String,
+    /// Ninety when absent; at most a year.
+    pub expires_in_days: Option<u32>,
 }
 
 pub async fn list_keys(pool: web::Data<PgPool>, req: HttpRequest, path: web::Path<String>) -> HttpResponse {
@@ -390,7 +404,7 @@ pub async fn list_keys(pool: web::Data<PgPool>, req: HttpRequest, path: web::Pat
 /// POST /api/treasury/accounts/{address}/api-keys - the only response that carries the key.
 pub async fn mint_key(pool: web::Data<PgPool>, req: HttpRequest, path: web::Path<String>, body: web::Json<NewKeyBody>) -> HttpResponse {
     let user = who!(pool, req);
-    reply(treasury_keys::mint_key(pool.get_ref(), user, &path, &body.name, &body.scope).await)
+    reply(treasury_keys::mint_key(pool.get_ref(), user, &path, &body.name, &body.scope, body.expires_in_days).await)
 }
 
 pub async fn revoke_key(pool: web::Data<PgPool>, req: HttpRequest, path: web::Path<(String, i64)>) -> HttpResponse {
@@ -540,6 +554,8 @@ pub fn routes(scope: actix_web::Scope) -> actix_web::Scope {
         .route("/link-address", web::post().to(link_address))
         .route("/accounts", web::get().to(list_accounts))
         .route("/accounts", web::post().to(create_account))
+        // Before /accounts/{address}: a path is matched to the first pattern that fits.
+        .route("/accounts/import", web::post().to(import_account))
         .route("/accounts/{address}", web::get().to(get_account))
         .route("/accounts/{address}/name", web::put().to(rename_account))
         .route("/accounts/{address}/sub-accounts", web::post().to(create_sub_account))

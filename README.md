@@ -61,7 +61,7 @@ version with new addresses and not an edit.
 cd contracts && forge test
 ```
 
-**Service.** 41 tests, and none of them need a database: every query is a runtime
+**Service.** 50 tests, and none of them need a database: every query is a runtime
 `sqlx::query_as`, so nothing is checked against a live schema at compile time.
 
 ```sh
@@ -79,7 +79,7 @@ cargo run
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `DATABASE_URL` | local Postgres | Where the projection lives. Losing it loses convenience, never authority: the indexer rebuilds it from the chain |
+| `DATABASE_URL` | local Postgres | Where the projection lives. Losing it loses convenience, never authority: a signer adds an Olien back by its address and the service rebuilds the row from the chain. Labels and proposals still collecting signatures were never on the chain and do not come back |
 | `DEPLOYMENTS_PATH` | `../deployments/10143.json` | Which chain this instance serves. A file with no `olien` key is refused at boot |
 | `RELAYER_PK` | none | Pays for account creation and executions. Without it the service reads and serves but cannot send |
 | `RPC_URL` | per chain | Overrides the built-in endpoint |
@@ -87,6 +87,14 @@ cargo run
 | `CORS_ALLOWED_ORIGINS` | empty, meaning permissive | Comma separated. Set it in production to the console's origin |
 | `MEMBERS_URL` | none | An optional directory that resolves `@handle` to an address. Without one, members are named by address |
 | `LOG_CHUNK_BLOCKS` | per chain | How wide one `eth_getLogs` may be. 100 on Monad, 5,000 on Arc |
+| `OLIEN_SKIP_CODE_CHECK` | unset | At boot the service refuses to start unless the four contracts in the deployment file are Olien v1, by address and by the hash of their code. Set this only for a local chain carrying a build of your own |
+
+As a container, from the repository root, which is the build context because the binary
+compiles `deployments/v1/creation.json` into itself:
+
+```sh
+docker build -t olien-service .
+```
 
 **Console.** One chain per build. `npm test` runs the rules the screens share, which
 shapes the wizard refuses and what the warnings say, on Node's own runner; no browser.

@@ -16,6 +16,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::canonical;
 use crate::members::Members;
 use crate::olien::{
     self, address_of_signer_id, calldata, signer_id_of_address, signer_id_of_key, Call, IOlien, Init, OlienClient, PackedUserOperation,
@@ -185,6 +186,7 @@ pub struct SignerRow {
     pub label: String,
     pub since: i64,
     pub status: String,
+    pub synced: Option<bool>,
 }
 
 impl SignerRow {
@@ -306,6 +308,10 @@ pub struct SignerJson {
     pub permissions: Vec<&'static str>,
     pub since: i64,
     pub mine: bool,
+    /// Passkeys only: true when its authenticator said it syncs across a cloud
+    /// account, false when it said it does not, absent when nobody recorded it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synced: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -570,6 +576,8 @@ pub struct SignerBody {
     pub y: Option<String>,
     // Passkeys only; defaults to true, which is what the console creates.
     pub uv_required: Option<bool>,
+    // Passkeys only: whether the authenticator said the key syncs across a cloud account.
+    pub synced: Option<bool>,
     // A Recourse account by name; resolved to its address and kind before anything else.
     pub handle: Option<String>,
 }
@@ -780,7 +788,7 @@ pub async fn load_account_by_id(pool: &PgPool, id: i64) -> Res<AccountRow> {
 
 pub async fn signers_of(pool: &PgPool, olien_id: i64) -> Res<Vec<SignerRow>> {
     Ok(sqlx::query_as::<_, SignerRow>(
-        "SELECT signer_id, kind, permissions, flags, address, x, y, label, since, status
+        "SELECT signer_id, kind, permissions, flags, address, x, y, label, since, status, synced
          FROM olien_signers WHERE olien_id = $1 ORDER BY since, signer_id",
     )
     .bind(olien_id)
@@ -1020,10 +1028,10 @@ pub async fn create_account(pool: &PgPool, treasury: &Treasury, user: i64, body:
     .bind(hex(salt.as_slice()))
     .fetch_one(pool)
     .await?;
-    for (signer, key) in init.signers.iter().zip(&keys) {
+    for ((signer, key), given) in init.signers.iter().zip(&keys).zip(&body.signers) {
         sqlx::query(
-            "INSERT INTO olien_signers (olien_id, signer_id, kind, permissions, flags, address, x, y, label)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING",
+            "INSERT INTO olien_signers (olien_id, signer_id, kind, permissions, flags, address, x, y, label, synced)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING",
         )
         .bind(id)
         .bind(hex(key.id.as_slice()))
@@ -1034,6 +1042,7 @@ pub async fn create_account(pool: &PgPool, treasury: &Treasury, user: i64, body:
         .bind(key.x.map(|v| v.to_string()))
         .bind(key.y.map(|v| v.to_string()))
         .bind(labels.get(&key.handle()).cloned().unwrap_or_default())
+        .bind(given.synced.filter(|_| signer.kind == KIND_WEBAUTHN))
         .execute(pool)
         .await?;
     }
@@ -1058,24 +1067,7 @@ pub async fn create_account(pool: &PgPool, treasury: &Treasury, user: i64, body:
     .execute(pool)
     .await?;
 
-    // The once-per-account guard of 06-algorithms.md §1: the hash the service will ask
-    // people to sign must be the contract's own, or nothing is signed against it.
-    let sample = Transaction {
-        nonceKey: alloy::primitives::Uint::<192, 3>::from(7u64),
-        calls: vec![Call { to: predicted, value: U256::from(1u64), data: Bytes::from_static(b"\x01\x02") }],
-        validAfter: olien::u48(1),
-        validUntil: olien::u48(2),
-    };
-    let onchain = client
-        .transaction_hash_onchain(predicted, &sample)
-        .await
-        .map_err(|e| TreasuryError::Chain(format!("{e:#}")))?;
-    // The contract hashes with its own epoch (1 after initialisation) and the lane's
-    // sequence, so both are read rather than assumed.
-    let config = client.config(predicted).await.map_err(|e| TreasuryError::Chain(format!("{e:#}")))?;
-    let sequence = client.nonce(predicted, U256::from(7u64)).await.map_err(|e| TreasuryError::Chain(format!("{e:#}")))?;
-    let local = olien::transaction_hash(treasury.chain_id, predicted, olien::nonce_of(U256::from(7u64), sequence), config.epoch, &sample.calls, 1, 2);
-    if onchain != local {
+    if !hashes_as_the_account_does(client, treasury.chain_id, predicted).await? {
         sqlx::query("UPDATE olien_accounts SET status = 'disabled', updated_at = now() WHERE id = $1")
             .bind(id)
             .execute(pool)
@@ -1086,6 +1078,100 @@ pub async fn create_account(pool: &PgPool, treasury: &Treasury, user: i64, body:
     }
 
     let row = load_account_by_id(pool, id).await?;
+    refresh_account_from_chain(pool, client, &row).await?;
+    account_view(pool, treasury, user, &row.address).await
+}
+
+/// The once-per-account guard of 06-algorithms.md §1: the hash the service will ask
+/// people to sign must be the contract's own, or nothing is signed against it. The
+/// contract hashes with its own epoch and the lane's sequence, so both are read rather
+/// than assumed.
+async fn hashes_as_the_account_does(client: &OlienClient, chain_id: u64, account: Address) -> Res<bool> {
+    let chain = |e: anyhow::Error| TreasuryError::Chain(format!("{e:#}"));
+    let sample = Transaction {
+        nonceKey: alloy::primitives::Uint::<192, 3>::from(7u64),
+        calls: vec![Call { to: account, value: U256::from(1u64), data: Bytes::from_static(b"\x01\x02") }],
+        validAfter: olien::u48(1),
+        validUntil: olien::u48(2),
+    };
+    let onchain = client.transaction_hash_onchain(account, &sample).await.map_err(chain)?;
+    let config = client.config(account).await.map_err(chain)?;
+    let sequence = client.nonce(account, U256::from(7u64)).await.map_err(chain)?;
+    let local = olien::transaction_hash(chain_id, account, olien::nonce_of(U256::from(7u64), sequence), config.epoch, &sample.calls, 1, 2);
+    Ok(onchain == local)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportBody {
+    pub address: String,
+    pub name: Option<String>,
+}
+
+/// Bring an Olien that already exists on the chain into this service.
+///
+/// Everything the chain decides is only mirrored here, and until this existed that was
+/// true of everything except the account itself: a row came only from creating the
+/// account through this service, so a lost database, or a team moving to a service of
+/// its own, left an account on the chain that no console could open. This rebuilds the
+/// row from the chain. It carries no authority: who the signers are, and what they may
+/// do, is read from the account, and the caller has to be one of them.
+///
+/// What cannot be rebuilt is what was never on the chain: labels, the name, and
+/// proposals still collecting signatures. History before the import is not indexed.
+pub async fn import_account(pool: &PgPool, treasury: &Treasury, user: i64, body: ImportBody) -> Res<AccountView> {
+    let client = treasury.client.as_ref().ok_or(TreasuryError::Off)?;
+    let account = parse_address(&body.address)?;
+    let name = body.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Imported Olien").to_string();
+    if name.chars().count() > 80 {
+        return Err(bad("name must be 1 to 80 characters"));
+    }
+    let known: Option<(String,)> = sqlx::query_as("SELECT address FROM olien_accounts WHERE address = $1").bind(addr(account)).fetch_optional(pool).await?;
+    if let Some((address,)) = known {
+        // Already here: a member sees it, and anyone else is told what anyone else is.
+        return account_view(pool, treasury, user, &address).await;
+    }
+    let chain = |e: anyhow::Error| TreasuryError::Chain(format!("{e:#}"));
+    // Every account the factory makes is the same proxy, so its code has one hash.
+    if client.code_hash(account).await.map_err(chain)? != canonical::account_code_hash() {
+        return Err(bad("there is no Olien at this address on this chain"));
+    }
+    if client.implementation(account).await.map_err(chain)? != client.deployment.implementation {
+        return Err(bad("this Olien runs an implementation this service does not serve"));
+    }
+    let signers = client.signers(account).await.map_err(chain)?;
+    let linked = linked_set(pool, user).await?;
+    let member = signers
+        .iter()
+        .filter(|(_, view)| view.kind == KIND_ECDSA || view.kind == KIND_CONTRACT)
+        .filter_map(|(id, _)| address_of_signer_id(*id))
+        .any(|address| linked.contains(&addr(address)));
+    if !member {
+        return Err(TreasuryError::Forbidden);
+    }
+    if !hashes_as_the_account_does(client, treasury.chain_id, account).await? {
+        return Err(TreasuryError::Chain("the account's transaction hash does not match the service's; it was not added".into()));
+    }
+    let config = client.config(account).await.map_err(chain)?;
+    let block = client.block_number().await.map_err(chain)? as i64;
+    // created_by stays empty: the importer's standing is the chain's, as a signer, and
+    // being the one who typed the address in gives nothing beyond that.
+    sqlx::query(
+        "INSERT INTO olien_accounts (address, chain_id, name, threshold, veto_threshold, config_delay, recovery_delay,
+            recovery_cosign_delay, init, salt, status, created_block, indexed_block)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb, '', 'live', $9, $9) ON CONFLICT (address) DO NOTHING",
+    )
+    .bind(addr(account))
+    .bind(treasury.chain_id as i64)
+    .bind(&name)
+    .bind(config.threshold as i32)
+    .bind(config.vetoThreshold as i32)
+    .bind(config.configDelay.to::<u64>() as i64)
+    .bind(config.recoveryDelay.to::<u64>() as i64)
+    .bind(config.recoveryCoSignDelay.to::<u64>() as i64)
+    .bind(block)
+    .execute(pool)
+    .await?;
+    let row = load_account(pool, &addr(account)).await?;
     refresh_account_from_chain(pool, client, &row).await?;
     account_view(pool, treasury, user, &row.address).await
 }
@@ -1161,18 +1247,25 @@ pub async fn refresh_account_from_chain(pool: &PgPool, client: &OlienClient, row
             .await?;
     for (intent,) in intents {
         for entry in intent.get("labels").and_then(|v| v.as_array()).into_iter().flatten() {
-            let (Some(handle), Some(label)) = (entry.get("address").and_then(|v| v.as_str()), entry.get("label").and_then(|v| v.as_str())) else {
+            let Some(handle) = entry.get("address").and_then(|v| v.as_str()) else {
                 continue;
             };
-            if label.is_empty() {
-                continue;
+            if let Some(label) = entry.get("label").and_then(|v| v.as_str()).filter(|l| !l.is_empty()) {
+                sqlx::query("UPDATE olien_signers SET label = $3 WHERE olien_id = $1 AND label = '' AND (address = $2 OR signer_id = $2)")
+                    .bind(row.id)
+                    .bind(handle)
+                    .bind(label)
+                    .execute(pool)
+                    .await?;
             }
-            sqlx::query("UPDATE olien_signers SET label = $3 WHERE olien_id = $1 AND label = '' AND (address = $2 OR signer_id = $2)")
-                .bind(row.id)
-                .bind(handle)
-                .bind(label)
-                .execute(pool)
-                .await?;
+            if let Some(synced) = entry.get("synced").and_then(|v| v.as_bool()) {
+                sqlx::query("UPDATE olien_signers SET synced = $3 WHERE olien_id = $1 AND synced IS NULL AND kind = 'webauthn' AND signer_id = $2")
+                    .bind(row.id)
+                    .bind(handle)
+                    .bind(synced)
+                    .execute(pool)
+                    .await?;
+            }
         }
     }
 
@@ -1265,6 +1358,7 @@ pub async fn account_view(pool: &PgPool, treasury: &Treasury, user: i64, address
                 permissions: permission_names(s.permissions),
                 since: s.since,
                 mine: mine.contains(&s.signer_id),
+                synced: s.synced,
             })
             .collect(),
         usdc_balance: row.usdc_balance.clone(),
@@ -1726,10 +1820,10 @@ pub async fn propose_signers(pool: &PgPool, treasury: &Treasury, user: i64, addr
     require_live(&ctx.row)?;
     let account = ctx.row.address();
     let mut calls = Vec::new();
-    let mut labels: Vec<(String, String)> = Vec::new();
+    let mut labels: Vec<(String, String, Option<bool>)> = Vec::new();
     for s in &body.add {
         let (input, key) = signer_input(s)?;
-        labels.push((key.handle(), s.label.clone().unwrap_or_default()));
+        labels.push((key.handle(), s.label.clone().unwrap_or_default(), s.synced.filter(|_| input.kind == KIND_WEBAUTHN)));
         calls.push(Call { to: account, value: U256::ZERO, data: calldata::add_signer(input) });
     }
     for id in &body.remove {
@@ -1737,7 +1831,7 @@ pub async fn propose_signers(pool: &PgPool, treasury: &Treasury, user: i64, addr
     }
     for r in &body.replace {
         let (input, key) = signer_input(&r.with)?;
-        labels.push((key.handle(), r.with.label.clone().unwrap_or_default()));
+        labels.push((key.handle(), r.with.label.clone().unwrap_or_default(), r.with.synced.filter(|_| input.kind == KIND_WEBAUTHN)));
         calls.push(Call { to: account, value: U256::ZERO, data: calldata::replace_signer(parse_hash(&r.signer_id)?, input) });
     }
     if let Some(t) = body.threshold {
@@ -1752,7 +1846,7 @@ pub async fn propose_signers(pool: &PgPool, treasury: &Treasury, user: i64, addr
     if calls.is_empty() {
         return Err(bad("nothing to change"));
     }
-    let intent = json!({ "labels": labels.iter().map(|(a, l)| json!({ "address": a, "label": l })).collect::<Vec<_>>() });
+    let intent = json!({ "labels": labels.iter().map(|(a, l, s)| json!({ "address": a, "label": l, "synced": s })).collect::<Vec<_>>() });
     let kind = if body.add.is_empty() && body.remove.is_empty() && body.replace.is_empty() { "rule_change" } else { "signer_change" };
     insert_proposal(pool, client, treasury.chain_id, &ctx, user, kind.into(), intent, calls, None, None, None, None, None).await
 }
@@ -2784,6 +2878,7 @@ mod tests {
             x: Some(x.into()),
             y: Some(y.into()),
             uv_required: None,
+            synced: None,
             handle: None,
         };
         let (input, key) = signer_input(&body).unwrap();
@@ -2798,9 +2893,9 @@ mod tests {
         let (input, _) = signer_input(&plain).unwrap();
         assert_eq!(input.flags, 0, "only passkeys carry the user-verification flag");
 
-        let missing = SignerBody { kind: Some("webauthn".into()), address: None, label: None, permissions: None, x: None, y: None, uv_required: None, handle: None };
+        let missing = SignerBody { kind: Some("webauthn".into()), address: None, label: None, permissions: None, x: None, y: None, uv_required: None, synced: None, handle: None };
         assert!(signer_input(&missing).is_err());
-        let ecdsa = SignerBody { kind: None, address: Some("0x12808a601475b87ce7b343A18f11062cc74Eae81".into()), label: None, permissions: None, x: None, y: None, uv_required: None, handle: None };
+        let ecdsa = SignerBody { kind: None, address: Some("0x12808a601475b87ce7b343A18f11062cc74Eae81".into()), label: None, permissions: None, x: None, y: None, uv_required: None, synced: None, handle: None };
         let (input, key) = signer_input(&ecdsa).unwrap();
         assert_eq!(input.key.len(), 20);
         assert_eq!(key.handle(), "0x12808a601475b87ce7b343a18f11062cc74eae81");
