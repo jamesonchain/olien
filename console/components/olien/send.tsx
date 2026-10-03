@@ -6,7 +6,7 @@ import { useState } from "react";
 import { errorMessage, formatDay, formatUsdc, nowSeconds, proposeTransfer } from "@/lib/treasury";
 import { AddRecipientButton, newRecipient, recipientsTotal, RecipientsEditor, validateRecipients, type RecipientDraft } from "./recipients";
 import { Button, Disclosure, Field, InlineError, Loading, Note, Panel } from "./ui";
-import { accountError, applyProposal, useAddressBook, useOlienAccount } from "./use-olien";
+import { accountError, applyProposal, useOlienAccount, useSuggestions } from "./use-olien";
 
 const DAY = 86_400;
 
@@ -14,7 +14,7 @@ export function OlienSend({ address }: { address: string }) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const account = useOlienAccount(address);
-  const book = useAddressBook(address);
+  const entries = useSuggestions(address);
   const [recipients, setRecipients] = useState<RecipientDraft[]>(() => [newRecipient()]);
   const [lane, setLane] = useState("0");
   const [validDays, setValidDays] = useState(7);
@@ -29,7 +29,6 @@ export function OlienSend({ address }: { address: string }) {
   const total = recipientsTotal(recipients);
   const balance = BigInt(view.usdcBalance || "0");
   const overBalance = total > balance;
-  const entries = book.data ?? [];
 
   async function submit() {
     if (!/^\d+$/.test(lane)) {

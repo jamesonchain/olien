@@ -3,7 +3,7 @@
 // Touch ID can approve a payment the same way a hardware wallet does. Nothing here talks
 // to the service: it produces the signer input to add and the envelope to confirm with.
 
-import { bytesToHex, encodeAbiParameters, hexToBytes, keccak256, type Hex } from "viem";
+import { bytesToHex, decodeAbiParameters, encodeAbiParameters, hexToBytes, keccak256, type Hex } from "viem";
 
 export interface PasskeyRecord {
   signerId: Hex;
@@ -201,6 +201,35 @@ export async function signWithPasskey(hash: Hex, candidates: PasskeyCandidate[])
     [bytesToHex(authData), fields, r, lowS],
   );
   return { signerId: signer.signerId, signature };
+}
+
+// Whether a passkey with this public key signed this hash: the check the account makes
+// on chain, made here. An address book entry is believed only on a signature this
+// console has checked itself, and for a passkey member that signature is a WebAuthn
+// assertion whose challenge is the hash.
+export async function verifyPasskeySignature(hash: Hex, signature: Hex, x: string | null, y: string | null): Promise<boolean> {
+  try {
+    const [authData, fields, r, s] = decodeAbiParameters([{ type: "bytes" }, { type: "string" }, { type: "uint256" }, { type: "uint256" }], signature);
+    const auth = hexToBytes(authData);
+    // Byte 32 holds the flags; bit 0 is user presence, which the account requires.
+    if (auth.length < 37 || (auth[32] & 0x01) === 0) return false;
+    const clientData = new TextEncoder().encode(`{"type":"webauthn.get","challenge":"${base64url(hexToBytes(hash))}",${fields}}`);
+    const clientHash = new Uint8Array(await crypto.subtle.digest("SHA-256", plain(clientData)));
+    const signed = new Uint8Array(auth.length + clientHash.length);
+    signed.set(auth);
+    signed.set(clientHash, auth.length);
+    const raw = new Uint8Array(65);
+    raw[0] = 4;
+    raw.set(hexToBytes(hex32(coordinate(x))), 1);
+    raw.set(hexToBytes(hex32(coordinate(y))), 33);
+    const key = await crypto.subtle.importKey("raw", plain(raw), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    const rs = new Uint8Array(64);
+    rs.set(hexToBytes(hex32(r)), 0);
+    rs.set(hexToBytes(hex32(s)), 32);
+    return await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, plain(rs), plain(signed));
+  } catch {
+    return false;
+  }
 }
 
 // DER SEQUENCE { INTEGER r, INTEGER s }, each big-endian with a possible leading zero.

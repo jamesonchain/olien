@@ -446,6 +446,42 @@ export function chequeDigest(fields: ChequeFields): Hex {
   });
 }
 
+// ----------------------------------------------------------------- the address book
+
+export interface BookEntryFields {
+  entry: string;
+  label: string;
+  category: string;
+  addedAt: number;
+}
+
+const BOOK_TYPES = {
+  AddressBookEntry: [
+    { name: "entry", type: "address" },
+    { name: "label", type: "string" },
+    { name: "category", type: "string" },
+    { name: "addedAt", type: "uint48" },
+  ],
+} as const;
+
+// What a member signs to put an address in the book: the address, what it is called,
+// and when. It is a struct of its own in the account's domain, which the account never
+// verifies, so the signature is worth nothing on the chain. The time is inside it so
+// that nobody holding the database can make an entry look older than it is, which is
+// what a new destination's wait is counted from.
+export function addressBookTypedData(chainId: number, account: string, fields: BookEntryFields) {
+  return {
+    domain: olienDomain(chainId, account),
+    types: BOOK_TYPES,
+    primaryType: "AddressBookEntry" as const,
+    message: { entry: getAddress(fields.entry), label: fields.label, category: fields.category, addedAt: fields.addedAt },
+  };
+}
+
+export function addressBookHash(chainId: number, account: string, fields: BookEntryFields): Hex {
+  return hashTypedData(addressBookTypedData(chainId, account, fields));
+}
+
 // ----------------------------------------------------------------- single-signer operations
 
 export interface OperationFields {

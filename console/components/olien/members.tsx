@@ -10,7 +10,8 @@ import { keyName, lockedByLosing, lockoutMessage, syncedCanMeet, syncedMessage, 
 import { MemberRows, newMember, signerInputOf, usePasskeyMember, validateMembers, type MemberDraft } from "./new-account";
 import { useWalletSession } from "./wallet";
 import { AddressChip, Button, Field, InlineError, Loading, Note, Panel, PermissionTags, plural, StatusPill, Table, Tag } from "./ui";
-import { accountError, applyProposal, useOlienAccount, useProposals } from "./use-olien";
+import { accountError, applyProposal, useChainAgreement, useOlienAccount, useProposals } from "./use-olien";
+import { ChainAgreementBanner } from "./policy";
 
 const KIND_LABELS: Record<SignerKind, string> = { ecdsa: "ECDSA", p256: "P-256", webauthn: "Passkey", contract: "Contract" };
 
@@ -207,6 +208,7 @@ function ThresholdForm({ address, account, onClose }: { address: string; account
 export function OlienMembers({ address }: { address: string }) {
   const account = useOlienAccount(address);
   const pending = useProposals(address, ["open", "ready", "blocked", "executing", "scheduled"]);
+  const chainDifference = useChainAgreement(address, account.data);
   const [form, setForm] = useState<Form>(null);
 
   if (account.isLoading) return <Loading label="Loading members" />;
@@ -251,6 +253,7 @@ export function OlienMembers({ address }: { address: string }) {
         </div>
       </div>
 
+      <ChainAgreementBanner difference={chainDifference} />
       {syncedAlone ? (
         <Note tone="warn" icon={<TriangleAlert size={14} />}>
           {syncedMessage(syncedAlone)}

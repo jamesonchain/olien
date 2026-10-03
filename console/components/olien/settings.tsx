@@ -3,13 +3,15 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowDownLeft, ArrowUpRight, Download, KeyRound, Lock, Plus, Radio, Send, Trash2, TriangleAlert } from "lucide-react";
 import { encodeFunctionData } from "viem";
-import { useSendTransaction } from "wagmi";
+import { useSendTransaction, useSignTypedData } from "wagmi";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { olienUsdcAddress as usdcAddress } from "@/lib/chain";
 import {
   addAddressBookEntry,
+  removeAddressBookEntry,
+  signerIdFor,
   durationLabel,
   errorMessage,
   formatDay,
@@ -49,11 +51,12 @@ import {
   type MintedApiKey,
 } from "@/lib/treasury";
 import { AddressChip, Button, CopyButton, cx, DurationInput, EmptyState, Field, InlineError, KeyValue, Loading, Note, Panel, Pill, plural, Table, Tabs, TxChip } from "./ui";
-import { accountError, applyProposal, olienKeys, useAddressBook, useApiKeys, useLedger, useOlienAccount, useServiceFeatures, useWebhookDeliveries, useWebhooks } from "./use-olien";
+import { accountError, applyProposal, olienKeys, useApiKeys, useLedger, useOlienAccount, useServiceFeatures, useSuggestions, useVerifiedBook, useWebhookDeliveries, useWebhooks, type VerifiedEntry } from "./use-olien";
+import { AuditSection, PolicySection } from "./policy";
 import { AddressInput } from "./recipients";
 import { friendlyWalletError, useOlienChain, useWalletSession, walletSigner } from "./wallet";
 import { chainName, chainSpec, olienPublicClient } from "@/lib/chain";
-import { checkOperation, OLIEN_ABI } from "@/lib/signing";
+import { addressBookHash, addressBookTypedData, checkOperation, OLIEN_ABI } from "@/lib/signing";
 import { friendlyPasskeyError, knownPasskeys, passkeySupported, signWithPasskey } from "@/lib/passkey";
 import { delayWarnings } from "@/lib/resilience";
 
@@ -307,7 +310,7 @@ function SpendForm({ address, account, limit, onClose }: { address: string; acco
   const wallet = useWalletSession();
   const ensureChain = useOlienChain();
   const { sendTransactionAsync } = useSendTransaction();
-  const book = useAddressBook(address);
+  const suggestions = useSuggestions(address);
   const [to, setTo] = useState(limit.anyDestination ? "" : (limit.destinations[0] ?? ""));
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState<"wallet" | "passkey" | null>(null);
@@ -400,12 +403,12 @@ function SpendForm({ address, account, limit, onClose }: { address: string; acco
       <div className="olien-form-grid">
         <Field label="To" className="olien-field--wide">
           {limit.anyDestination ? (
-            <AddressInput value={to} book={book.data ?? []} disabled={busy != null} onChange={(value) => setTo(value.trim())} onPick={(entry) => setTo(entry.address)} />
+            <AddressInput value={to} book={suggestions} disabled={busy != null} onChange={(value) => setTo(value.trim())} onPick={(entry) => setTo(entry.address)} />
           ) : (
             <select className="olien-input" value={to} disabled={busy != null} onChange={(event) => setTo(event.target.value)}>
               {limit.destinations.map((destination) => (
                 <option key={destination} value={destination}>
-                  {book.data?.find((entry) => entry.address.toLowerCase() === destination.toLowerCase())?.label ?? shortAddress(destination)}
+                  {suggestions.find((entry) => entry.address.toLowerCase() === destination.toLowerCase())?.label ?? shortAddress(destination)}
                 </option>
               ))}
             </select>
@@ -540,80 +543,138 @@ function LimitsSection({ address, account }: { address: string; account: Account
   );
 }
 
-function AddressBookSection({ address }: { address: string }) {
-  const book = useAddressBook(address);
+// The address book. An entry is what makes an address known, and when the treasury's
+// policy pays only known addresses, an entry is worth as much as an approval. So one is
+// made by a member signing the address, the label and the time, and believed only on a
+// signature this browser has checked: the service stores the book and is the one party
+// that must not be able to write in it.
+function AddressBookSection({ address, account }: { address: string; account: AccountView }) {
+  const signedBook = useServiceFeatures()("signed-book");
+  const book = useVerifiedBook(address, account.signers);
   const queryClient = useQueryClient();
+  const wallet = useWalletSession();
+  const ensureChain = useOlienChain();
+  const { signTypedDataAsync } = useSignTypedData();
   const [adding, setAdding] = useState(false);
   const [entryAddress, setEntryAddress] = useState("");
   const [label, setLabel] = useState("");
   const [category, setCategory] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function submit() {
+  const mySigner = walletSigner(account, wallet.address);
+  const byWallet = Boolean(wallet.matches && mySigner?.permissions.includes("approve"));
+  const mine = new Set(knownPasskeys().map((record) => record.signerId.toLowerCase()));
+  const passkeys = account.signers.filter((signer) => signer.kind === "webauthn" && signer.permissions.includes("approve") && mine.has(signer.signerId.toLowerCase()));
+  const byPasskey = passkeys.length > 0 && passkeySupported();
+  const canSign = byWallet || byPasskey;
+
+  // Signs an entry with whichever key this browser holds and stores it. The time is
+  // taken here and goes inside the signature: it is what a new address's wait is
+  // counted from, and the service refuses one that is not now.
+  async function save(entry: { address: string; label: string; category: string }, key: string) {
     setError(null);
+    setBusy(key);
+    try {
+      if (!signedBook) {
+        await addAddressBookEntry(address, { address: entry.address, label: entry.label, ...(entry.category ? { category: entry.category } : {}) });
+      } else {
+        const addedAt = nowSeconds();
+        const fields = { entry: entry.address, label: entry.label, category: entry.category, addedAt };
+        let signed: { signerId: string; signature: string };
+        if (byWallet && wallet.address) {
+          await ensureChain();
+          signed = { signerId: signerIdFor(wallet.address), signature: await signTypedDataAsync(addressBookTypedData(chainSpec.id, address, fields)) };
+        } else {
+          signed = await signWithPasskey(addressBookHash(chainSpec.id, address, fields), passkeys.map((signer) => ({ signerId: signer.signerId, x: signer.x, y: signer.y })));
+        }
+        await addAddressBookEntry(address, { address: entry.address, label: entry.label, ...(entry.category ? { category: entry.category } : {}), ...signed, addedAt });
+      }
+      await queryClient.invalidateQueries({ queryKey: olienKeys.addressBook(address) });
+      return true;
+    } catch (cause) {
+      setError(byWallet ? friendlyWalletError(cause) : friendlyPasskeyError(cause));
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function submit() {
     if (!isValidAddress(entryAddress)) return setError("Enter a valid address.");
     if (!label.trim()) return setError("Give the address a label.");
-    setBusy(true);
-    try {
-      await addAddressBookEntry(address, { address: entryAddress.toLowerCase(), label: label.trim(), ...(category.trim() ? { category: category.trim() } : {}) });
-      await queryClient.invalidateQueries({ queryKey: olienKeys.addressBook(address) });
+    if (await save({ address: entryAddress.toLowerCase(), label: label.trim(), category: category.trim() }, "new")) {
       setEntryAddress("");
       setLabel("");
       setCategory("");
       setAdding(false);
-    } catch (cause) {
-      setError(errorMessage(cause));
-    } finally {
-      setBusy(false);
     }
   }
 
-  const entries = book.data ?? [];
+  async function remove(entry: VerifiedEntry) {
+    if (!window.confirm(`Remove "${entry.label}" from the address book? A payment to it that is waiting on the policy will be held.`)) return;
+    setError(null);
+    setBusy(`remove:${entry.address}`);
+    try {
+      await removeAddressBookEntry(address, entry.address);
+      await queryClient.invalidateQueries({ queryKey: olienKeys.addressBook(address) });
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const entries = book.entries;
 
   return (
     <Panel
       title="Address book"
       action={
         !adding ? (
-          <Button size="sm" icon={<Plus size={13} />} onClick={() => setAdding(true)}>
+          <Button size="sm" icon={<Plus size={13} />} disabled={signedBook && !canSign} onClick={() => setAdding(true)}>
             Add address
           </Button>
         ) : null
       }
     >
+      {signedBook ? (
+        <p className="olien-panel-lead">
+          An entry is a member&apos;s signed word that an address is who its label says. This browser checks each signature itself, and an entry nobody has signed counts for nothing. Any member can remove one at once.
+        </p>
+      ) : null}
       {adding ? (
         <div className="olien-subform">
           <div className="olien-form-grid olien-form-grid--3">
             <Field label="Address">
-              <input className="olien-input olien-input--mono" value={entryAddress} placeholder="0x" spellCheck={false} disabled={busy} onChange={(event) => setEntryAddress(event.target.value.trim())} />
+              <input className="olien-input olien-input--mono" value={entryAddress} placeholder="0x" spellCheck={false} disabled={busy != null} onChange={(event) => setEntryAddress(event.target.value.trim())} />
             </Field>
             <Field label="Label">
-              <input className="olien-input" value={label} placeholder="Acme Ltd" disabled={busy} onChange={(event) => setLabel(event.target.value)} />
+              <input className="olien-input" value={label} placeholder="Acme Ltd" maxLength={80} disabled={busy != null} onChange={(event) => setLabel(event.target.value)} />
             </Field>
             <Field label="Category (optional)">
-              <input className="olien-input" value={category} placeholder="Supplier" disabled={busy} onChange={(event) => setCategory(event.target.value)} />
+              <input className="olien-input" value={category} placeholder="Supplier" maxLength={40} disabled={busy != null} onChange={(event) => setCategory(event.target.value)} />
             </Field>
           </div>
-          <InlineError message={error} />
           <div className="olien-actions">
-            <Button variant="primary" busy={busy} onClick={() => void submit()}>
-              Save
+            <Button variant="primary" busy={busy === "new"} disabled={busy != null} onClick={() => void submit()}>
+              {signedBook ? (byWallet ? "Sign and save" : "Sign with passkey and save") : "Save"}
             </Button>
-            <Button variant="ghost" disabled={busy} onClick={() => setAdding(false)}>
+            <Button variant="ghost" disabled={busy != null} onClick={() => setAdding(false)}>
               Cancel
             </Button>
           </div>
         </div>
       ) : null}
+      <InlineError message={error} />
       {book.isLoading ? (
         <Loading label="Loading the address book" />
       ) : book.error ? (
         <InlineError message={errorMessage(book.error)} />
       ) : entries.length === 0 ? (
-        <EmptyState title="No saved addresses" hint="Labels show in the ledger and as suggestions when you send." />
+        <EmptyState title="No saved addresses" hint={signedBook ? "An address a member signs in here is known to the treasury's policy and offered when you send." : "Labels show in the ledger and as suggestions when you send."} />
       ) : (
-        <Table head={["Label", "Address", "Category"]}>
+        <Table head={signedBook ? ["Label", "Address", "Category", "Vouched for by", ""] : ["Label", "Address", "Category"]}>
           {entries.map((entry) => (
             <tr key={entry.address}>
               <td>
@@ -623,6 +684,32 @@ function AddressBookSection({ address }: { address: string }) {
                 <AddressChip address={entry.address} />
               </td>
               <td className="olien-muted">{entry.category || ""}</td>
+              {signedBook ? (
+                <>
+                  <td className="olien-muted">
+                    {entry.verified ? (
+                      <>
+                        {entry.signedBy}
+                        {entry.addedAt ? `, ${formatDay(entry.addedAt)}` : ""}
+                      </>
+                    ) : (
+                      <Pill tone="amber">Unsigned</Pill>
+                    )}
+                  </td>
+                  <td className="olien-cell-end">
+                    <div className="olien-actions">
+                      {!entry.verified && canSign ? (
+                        <Button size="sm" busy={busy === `sign:${entry.address}`} disabled={busy != null} onClick={() => void save({ address: entry.address, label: entry.label, category: entry.category ?? "" }, `sign:${entry.address}`)}>
+                          Sign
+                        </Button>
+                      ) : null}
+                      <Button variant="ghost" size="sm" icon={<Trash2 size={13} />} busy={busy === `remove:${entry.address}`} disabled={busy != null} onClick={() => void remove(entry)}>
+                        Remove
+                      </Button>
+                    </div>
+                  </td>
+                </>
+              ) : null}
             </tr>
           ))}
         </Table>
@@ -1165,6 +1252,7 @@ function WebhooksSection({ address }: { address: string }) {
 
 export function OlienSettings({ address }: { address: string }) {
   const account = useOlienAccount(address);
+  const serviceCan = useServiceFeatures();
   if (account.isLoading) return <Loading label="Loading settings" />;
   if (account.error || !account.data) return <InlineError message={accountError(account.error)} />;
   const view = account.data;
@@ -1172,11 +1260,13 @@ export function OlienSettings({ address }: { address: string }) {
     <div className="olien-page olien-stack">
       <AddressesSection account={view} />
       <TimeLockSection address={address} account={view} />
+      {serviceCan("policy") ? <PolicySection address={address} account={view} /> : null}
       <LimitsSection address={address} account={view} />
-      <AddressBookSection address={address} />
+      <AddressBookSection address={address} account={view} />
       <SubAccountsSection account={view} />
       <ApiKeysSection address={address} />
       <WebhooksSection address={address} />
+      {serviceCan("audit") ? <AuditSection address={address} /> : null}
       <LedgerSection address={address} />
     </div>
   );

@@ -1721,6 +1721,20 @@ strong > .olien-tag {
   overflow-wrap: anywhere;
 }
 
+.olien-rule--policy > svg {
+  color: var(--amber);
+}
+
+.olien-policy-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .olien-call.is-warn .olien-call-index {
   border-color: rgba(245, 182, 66, 0.5);
   color: var(--amber);

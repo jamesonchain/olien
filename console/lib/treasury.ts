@@ -250,6 +250,8 @@ export interface ProposalView {
   missing: MissingSigner[];
   blockedBy: string | null;
   hardRules: HardRule[];
+  // The treasury's policy still holding this back; absent from an older service.
+  softRules?: SoftRule[];
   simulation: SimulationView | null;
   scheduledReadyAt: number | null;
   scheduledWindowEndsAt: number | null;
@@ -337,6 +339,67 @@ export interface AddressBookEntry {
   label: string;
   category: string | null;
   createdAt?: number;
+  // The member who vouched for it, their signature over the address, the label, the
+  // category and the time, and that time. Absent on an entry nobody has signed, and
+  // from a service that does not sign entries.
+  signerId?: string | null;
+  signature?: string | null;
+  addedAt?: number | null;
+}
+
+// The treasury's own rules about money, kept by the service and not by the chain.
+export interface PolicyTier {
+  // Above this much in one transaction, in the token's smallest unit.
+  above: string;
+  approvals: number;
+}
+
+export interface PolicyHours {
+  // 0 is Sunday.
+  days: number[];
+  // Minutes of the day, at the offset below from UTC.
+  start: number;
+  end: number;
+  utcOffset: number;
+}
+
+export interface TreasuryPolicy {
+  tiers: PolicyTier[];
+  requireKnownDestination: boolean;
+  newDestinationDelay: number;
+  hours: PolicyHours | null;
+}
+
+export interface PolicyView {
+  policy: TreasuryPolicy;
+  // A change that loosens the policy, waiting; any member can cancel it before then.
+  pending: { policy: TreasuryPolicy; effectiveAt: number; proposedBy: string | null; loosens: string[] } | null;
+  changeDelay: number;
+}
+
+// One thing the policy still has against a payment, and when it stops holding by itself.
+export interface SoftRule {
+  rule: string;
+  text: string;
+  until: number | null;
+}
+
+export interface AuditRow {
+  id: number;
+  at: number;
+  actor: string | null;
+  via: string | null;
+  action: string;
+  subject: string | null;
+  detail: Record<string, unknown>;
+  previous: string;
+  hash: string;
+}
+
+export interface AuditPage {
+  rows: AuditRow[];
+  // Whether every row hashes to what it says and names the row before it.
+  intact: boolean;
 }
 
 export interface TransferProposalBody {
@@ -453,8 +516,24 @@ export const getLedger = (address: string, limit = 100) =>
   request<LedgerEntry[]>(`/accounts/${address}/ledger?limit=${limit}`);
 export const getAddressBook = (address: string) =>
   request<AddressBookEntry[]>(`/accounts/${address}/address-book`);
-export const addAddressBookEntry = (address: string, body: { address: string; label: string; category?: string }) =>
+export const addAddressBookEntry = (address: string, body: { address: string; label: string; category?: string; signerId?: string; signature?: string; addedAt?: number }) =>
   request<AddressBookEntry>(`/accounts/${address}/address-book`, post(body));
+export const removeAddressBookEntry = async (address: string, entry: string): Promise<void> => {
+  await send(`/accounts/${address}/address-book/${entry}`, { method: "DELETE" });
+};
+
+export const getPolicy = (address: string) => request<PolicyView>(`/accounts/${address}/policy`);
+export const setPolicy = (address: string, policy: TreasuryPolicy) => request<PolicyView>(`/accounts/${address}/policy`, { method: "PUT", body: JSON.stringify(policy) });
+export const cancelPolicyChange = (address: string) => request<PolicyView>(`/accounts/${address}/policy/pending`, { method: "DELETE" });
+
+export const getAudit = (address: string, limit = 50) => request<AuditPage>(`/accounts/${address}/audit?limit=${limit}`);
+// The trail as a file. Whether it is intact comes back in a header, since a CSV has
+// nowhere else to say so.
+export async function getAuditCsv(address: string): Promise<{ csv: string; intact: boolean }> {
+  const res = await authFetch(`${BASE}/accounts/${address}/audit?format=csv&limit=1000`);
+  if (!res.ok) throw new TreasuryError(`The treasury service answered ${res.status}`, res.status);
+  return { csv: await res.text(), intact: res.headers.get("x-olien-audit-intact") !== "false" };
+}
 
 // An ECDSA signer's id is its address left-padded to 32 bytes (spec: signer ids are
 // bytes32; for ECDSA the low 20 bytes are the address).
@@ -861,6 +940,7 @@ export interface TreasuryCheque {
   status: ChequeStatus;
   signatures: ConfirmationView[];
   required: number;
+  softRules?: SoftRule[];
   voidProposalTxHash: string | null;
   proposer: string | null;
   createdAt: number;

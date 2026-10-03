@@ -2,16 +2,19 @@
 
 import { useQuery, type QueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { BaseError, parseAbi } from "viem";
-import { decodeContext, olienPublicClient as publicClient } from "@/lib/chain";
-import { decodeCalls, outgoing, type RawCall } from "@/lib/signing";
+import { BaseError, parseAbi, recoverAddress } from "viem";
+import { chainSpec, decodeContext, olienPublicClient as publicClient } from "@/lib/chain";
+import { verifyPasskeySignature } from "@/lib/passkey";
+import { addressBookHash, decodeCalls, outgoing, type RawCall } from "@/lib/signing";
 import {
   errorMessage,
   getAccount,
   getAccounts,
   getAddressBook,
   getApiKeys,
+  getAudit,
   getChainInfo,
+  getPolicy,
   getCheques,
   getPayrolls,
   getWebhookDeliveries,
@@ -23,9 +26,12 @@ import {
   getVetoCall,
   nowSeconds,
   TreasuryError,
+  type AccountView,
+  type AddressBookEntry,
   type Hex,
   type ProposalStatus,
   type ProposalView,
+  type SignerView,
 } from "@/lib/treasury";
 
 // Every open console page refetches on this cadence; the indexer refreshes views
@@ -49,6 +55,8 @@ export const olienKeys = {
   webhooks: (address: string) => ["olien", "webhooks", address] as const,
   deliveries: (address: string, id: number) => ["olien", "webhook-deliveries", address, id] as const,
   nativeBalance: (address: string) => ["olien", "native-balance", address] as const,
+  policy: (address: string) => ["olien", "policy", address] as const,
+  audit: (address: string) => ["olien", "audit", address] as const,
 };
 
 // What the service this console is talking to can do. The console offers a thing only
@@ -117,6 +125,118 @@ export function useLedger(address: string, limit = 100) {
 
 export function useAddressBook(address: string) {
   return useQuery({ queryKey: olienKeys.addressBook(address), queryFn: () => getAddressBook(address) });
+}
+
+export function usePolicy(address: string, enabled: boolean) {
+  return useQuery({ queryKey: olienKeys.policy(address), queryFn: () => getPolicy(address), refetchInterval: POLL_MS, enabled });
+}
+
+export function useAudit(address: string, enabled: boolean) {
+  return useQuery({ queryKey: olienKeys.audit(address), queryFn: () => getAudit(address, 25), refetchInterval: POLL_MS, enabled });
+}
+
+export interface VerifiedEntry extends AddressBookEntry {
+  // True only when this browser checked the entry's signature itself and found it to be
+  // from a member who may approve payments.
+  verified: boolean;
+  signedBy: string | null;
+}
+
+async function verifyEntry(account: string, entry: AddressBookEntry, signers: SignerView[]): Promise<VerifiedEntry> {
+  const unverified = { ...entry, verified: false, signedBy: null };
+  if (!entry.signerId || !entry.signature || entry.addedAt == null) return unverified;
+  const signer = signers.find((candidate) => candidate.signerId.toLowerCase() === entry.signerId?.toLowerCase());
+  if (!signer || !signer.permissions.includes("approve")) return unverified;
+  const hash = addressBookHash(chainSpec.id, account, { entry: entry.address, label: entry.label, category: entry.category ?? "", addedAt: entry.addedAt });
+  const signature = entry.signature as Hex;
+  let ok = false;
+  try {
+    if (signer.kind === "ecdsa" && signer.address) ok = (await recoverAddress({ hash, signature })).toLowerCase() === signer.address.toLowerCase();
+    else if (signer.kind === "webauthn") ok = await verifyPasskeySignature(hash, signature, signer.x, signer.y);
+    else if (signer.kind === "contract" && signer.address) ok = await publicClient.verifyHash({ address: signer.address as Hex, hash, signature });
+  } catch {
+    ok = false;
+  }
+  return ok ? { ...entry, verified: true, signedBy: signer.label || signer.signerId.slice(0, 10) } : unverified;
+}
+
+// The address book, with each entry's signature checked here. A label is somebody's
+// claim about an address, and the service that stores the book is the one party that
+// must not be able to make that claim, so a row counts only when a member's signature
+// over the address, the label and the time checks out in this browser. A row without
+// one, or with a signature from someone who is no longer a member, is unverified, and
+// the screens treat its address as unknown.
+export function useVerifiedBook(address: string, signers: SignerView[] | undefined) {
+  const book = useAddressBook(address);
+  const entries = book.data;
+  const fingerprint = `${(entries ?? []).map((entry) => `${entry.address}:${entry.label}:${entry.signature ?? ""}`).join("|")}#${(signers ?? []).map((signer) => `${signer.signerId}:${signer.permissions.join("")}`).join("|")}`;
+  const verified = useQuery({
+    queryKey: ["olien", "verified-book", address, fingerprint],
+    enabled: Boolean(entries && signers),
+    staleTime: 60_000,
+    queryFn: () => Promise.all((entries ?? []).map((entry) => verifyEntry(address, entry, signers ?? []))),
+  });
+  const list = verified.data ?? [];
+  return {
+    entries: list,
+    known: new Map(list.filter((entry) => entry.verified).map((entry) => [entry.address.toLowerCase(), entry])),
+    isLoading: book.isLoading || verified.isLoading,
+    error: book.error ?? verified.error,
+  };
+}
+
+// What to offer as a recipient is typed: the entries a member has signed, when the
+// service signs entries at all, and otherwise the book as it stands.
+export function useSuggestions(address: string): AddressBookEntry[] {
+  const signed = useServiceFeatures()("signed-book");
+  const account = useOlienAccount(address);
+  const book = useVerifiedBook(address, account.data?.signers);
+  return signed ? book.entries.filter((entry) => entry.verified) : book.entries;
+}
+
+const ACCOUNT_VIEWS = parseAbi([
+  "struct ConfigView { uint16 threshold; uint16 vetoThreshold; uint16 effectiveVetoThreshold; uint16 signerCount; uint16 approverCount; uint16 vetoerCount; uint16 approverVetoerCount; uint16 recovererCount; uint48 configDelay; uint48 recoveryDelay; uint48 recoveryCoSignDelay; uint64 epoch; uint256 limitCount; bool implementationFrozen; }",
+  "function getConfig() view returns (ConfigView)",
+  "function getSigners() view returns (bytes32[])",
+]);
+
+// Whether the service's picture of an account is the chain's, asked by this browser of
+// its own RPC: the epoch, the threshold and who the signers are. Those three decide
+// what a signature is worth, and everything else on a page is built on them. Null
+// while they agree, or the difference in words. The service's copy is up to a quarter
+// of a minute behind a change, so a difference is reported only when it is still there
+// the next time the chain is asked.
+export function useChainAgreement(address: string, account: AccountView | undefined): string | null {
+  const chain = useQuery({
+    queryKey: ["olien", "chain-view", address],
+    enabled: Boolean(account),
+    refetchInterval: 20_000,
+    retry: 1,
+    queryFn: async () => {
+      const target = address as Hex;
+      const [config, signers] = await Promise.all([
+        publicClient.readContract({ address: target, abi: ACCOUNT_VIEWS, functionName: "getConfig" }),
+        publicClient.readContract({ address: target, abi: ACCOUNT_VIEWS, functionName: "getSigners" }),
+      ]);
+      return { epoch: Number(config.epoch), threshold: Number(config.threshold), signers: signers.map((id) => id.toLowerCase()).sort() };
+    },
+  });
+  const difference = (() => {
+    if (!chain.data || !account) return null;
+    if (chain.data.epoch !== account.epoch) return `the epoch is ${chain.data.epoch} on the chain and ${account.epoch} here`;
+    if (chain.data.threshold !== account.threshold) return `the threshold is ${chain.data.threshold} on the chain and ${account.threshold} here`;
+    const here = account.signers.map((signer) => signer.signerId.toLowerCase()).sort();
+    if (here.length !== chain.data.signers.length || here.some((id, index) => id !== chain.data.signers[index])) return "the signers on the chain are not the signers shown here";
+    return null;
+  })();
+  const [streak, setStreak] = useState(0);
+  const asked = chain.dataUpdatedAt;
+  useEffect(() => {
+    if (asked) setStreak((count) => (difference ? count + 1 : 0));
+    // Counted once per answer from the chain, not once per render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asked]);
+  return difference && streak >= 2 ? difference : null;
 }
 
 export function useApiKeys(address: string) {

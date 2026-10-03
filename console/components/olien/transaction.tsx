@@ -33,7 +33,8 @@ import {
   type ProposalView,
 } from "@/lib/treasury";
 import { AddressChip, Button, CopyButton, Countdown, cx, Disclosure, InlineError, KeyValue, Loading, Note, Panel, plural, proposerLabel, Spinner, StatusPill, Tag, TxChip } from "./ui";
-import { accountError, applyProposal, olienKeys, useBrowserSimulation, useNow, useOlienAccount, useProposal, useVetoCall } from "./use-olien";
+import { accountError, applyProposal, olienKeys, useBrowserSimulation, useChainAgreement, useNow, useOlienAccount, useProposal, useServiceFeatures, useVerifiedBook, useVetoCall, type VerifiedEntry } from "./use-olien";
+import { ChainAgreementBanner, SoftRules } from "./policy";
 import { friendlyPasskeyError, knownPasskeys, passkeySupported, signWithPasskey } from "@/lib/passkey";
 import { friendlyWalletError, useOlienChain, useWalletSession, walletSigner } from "./wallet";
 
@@ -48,7 +49,7 @@ const DANGER_NOTES: Record<string, string> = {
 // One call of the transaction, as this console read it from the calldata. The address
 // is always shown in full: a label is somebody's claim about an address, so it sits
 // beside the address and never in its place.
-function ActionRow({ index, action, note, ctx }: { index: number; action: CallAction; note: Annotation | null; ctx: DecodeContext }) {
+function ActionRow({ index, action, note, ctx, book }: { index: number; action: CallAction; note: Annotation | null; ctx: DecodeContext; book: Map<string, VerifiedEntry> | null }) {
   const party = action.type === "transfer" || action.type === "native" || action.type === "unreadable" ? action.to : action.type === "allowance" ? action.spender : null;
   const amount =
     action.type === "transfer"
@@ -74,7 +75,17 @@ function ActionRow({ index, action, note, ctx }: { index: number; action: CallAc
             <AddressChip address={party} full />
           </span>
         ) : null}
-        {note?.label ? <small className="olien-muted">The proposer calls this address &ldquo;{note.label}&rdquo;.</small> : null}
+        {/* The book's word is a member's signature this browser checked; the proposer's is only theirs. */}
+        {party && book ? (
+          book.get(party.toLowerCase()) ? (
+            <small className="olien-ok">
+              In the address book as &ldquo;{book.get(party.toLowerCase())?.label}&rdquo;, signed by {book.get(party.toLowerCase())?.signedBy}.
+            </small>
+          ) : (
+            <small className="olien-call-warn">Not in the address book: no member has vouched for this address.</small>
+          )
+        ) : null}
+        {note?.label && !(party && book?.get(party.toLowerCase())) ? <small className="olien-muted">The proposer calls this address &ldquo;{note.label}&rdquo;.</small> : null}
         {note?.memo ? <small className="olien-muted">Memo: {note.memo}</small> : null}
         {action.type === "unreadable" ? <small className="olien-call-warn">This console cannot read this call: it is {action.why}. Its effect is whatever that contract does with it.</small> : null}
         {action.type === "allowance" ? <small className="olien-call-warn">An allowance is not a payment. It lets that address move the money later, with no further approval.</small> : null}
@@ -330,6 +341,9 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
   const proposal = useProposal(address, txHash);
   const wallet = useWalletSession();
   const ensureChain = useOlienChain();
+  const signedBook = useServiceFeatures()("signed-book");
+  const verifiedBook = useVerifiedBook(address, account.data?.signers);
+  const chainDifference = useChainAgreement(address, account.data);
   const { signTypedDataAsync } = useSignTypedData();
   const [busy, setBusy] = useState<Action | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -369,7 +383,7 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
   // Signing needs three things to hold: the hash is the hash of what is shown, the
   // description does not contradict the calldata, and anything this console could not
   // read has been looked at by the person about to sign it.
-  const truthful = signable && hashOk && !described.contradiction;
+  const truthful = signable && hashOk && !described.contradiction && !chainDifference;
   const readyToSign = truthful && ((unreadable === 0 && !risky) || acknowledged);
   const canApprove = readyToSign && wallet.matches && Boolean(mySigner?.permissions.includes("approve")) && myId !== null && !confirmedBy.has(myId);
   const canPasskey = readyToSign && passkeyApprovers.length > 0 && passkeySupported();
@@ -450,6 +464,7 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
       </div>
 
       <ResultBanner address={address} view={view} />
+      <ChainAgreementBanner difference={chainDifference} />
       {!hashOk ? (
         <Note tone="error" icon={<X size={15} />}>
           What this page shows does not hash to this proposal&apos;s hash on this account and chain. Do not rely on anything below, and do not sign or veto on the strength of it.
@@ -618,7 +633,7 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
           <Panel title="Transaction">
             <ul className="olien-calls">
               {actions.map((action, index) => (
-                <ActionRow key={index} index={index} action={action} note={described.notes[index]} ctx={ctx} />
+                <ActionRow key={index} index={index} action={action} note={described.notes[index]} ctx={ctx} book={signedBook ? verifiedBook.known : null} />
               ))}
             </ul>
             <p className="olien-field-hint">Read by this console from the calldata being signed, not from the description the proposal came with.</p>
@@ -633,6 +648,8 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
                 ))}
               </div>
             ) : null}
+
+            {signable ? <SoftRules rules={view.softRules} /> : null}
 
             {signable ? <SimulationLine address={address} calls={fields.calls} service={view.simulation} /> : null}
 

@@ -28,7 +28,8 @@ import {
 } from "@/lib/treasury";
 import { AddRecipientButton, AddressInput, draftsFrom, newRecipient, recipientsTotal, RecipientsEditor, validateRecipients, type RecipientDraft } from "./recipients";
 import { AddressChip, Button, Dialog, EmptyState, Field, InlineError, Loading, Note, Panel, Pill, plural, Table, TxChip } from "./ui";
-import { accountError, applyProposal, olienKeys, useAddressBook, useCheques, useOlienAccount, usePayrolls } from "./use-olien";
+import { accountError, applyProposal, olienKeys, useCheques, useOlienAccount, usePayrolls, useSuggestions } from "./use-olien";
+import { SoftRules } from "./policy";
 import { friendlyPasskeyError, knownPasskeys, passkeySupported, signWithPasskey } from "@/lib/passkey";
 import { friendlyWalletError, useWalletSession, walletSigner } from "./wallet";
 import { type AccountView } from "@/lib/treasury";
@@ -62,7 +63,7 @@ function unixFromDateInput(value: string): number | null {
 
 function PayrollEditor({ address, existing, onClose }: { address: string; existing: PayrollRun | null; onClose: () => void }) {
   const queryClient = useQueryClient();
-  const book = useAddressBook(address);
+  const suggestions = useSuggestions(address);
   const [name, setName] = useState(existing?.name ?? "");
   const [period, setPeriod] = useState<PayrollPeriod>(existing?.period ?? "none");
   const [firstRun, setFirstRun] = useState(dateInputValue(existing?.nextRunAt ?? null));
@@ -128,7 +129,7 @@ function PayrollEditor({ address, existing, onClose }: { address: string; existi
             <span className="olien-muted num">{formatUsdc(total)}</span>
             <AddRecipientButton recipients={recipients} onChange={setRecipients} disabled={busy} />
           </div>
-          <RecipientsEditor recipients={recipients} onChange={setRecipients} book={book.data ?? []} disabled={busy} />
+          <RecipientsEditor recipients={recipients} onChange={setRecipients} book={suggestions} disabled={busy} />
         </div>
         <InlineError message={error} />
         <div className="olien-dialog-actions">
@@ -344,9 +345,12 @@ function ChequeRow({ address, account, cheque }: { address: string; account: Acc
       <td>
         <Pill tone={chequeTone(cheque.status)}>{chequeLabel(cheque.status)}</Pill>
         {cheque.status === "open" ? (
-          <div className="olien-muted">
-            {cheque.signatures.length} of {cheque.required} signed
-          </div>
+          <>
+            <div className="olien-muted">
+              {cheque.signatures.length} of {cheque.required} signed
+            </div>
+            <SoftRules rules={cheque.softRules} compact />
+          </>
         ) : cheque.status === "voiding" && cheque.voidProposalTxHash ? (
           <div className="olien-muted">
             <Link href={`/${address}/transactions/${cheque.voidProposalTxHash}`} className="olien-link">
@@ -383,7 +387,7 @@ function ChequeRow({ address, account, cheque }: { address: string; account: Acc
 
 function ChequeForm({ address, onClose }: { address: string; onClose: () => void }) {
   const queryClient = useQueryClient();
-  const book = useAddressBook(address);
+  const suggestions = useSuggestions(address);
   const [to, setTo] = useState("");
   const [amount, setAmount] = useState("");
   const [memo, setMemo] = useState("");
@@ -413,7 +417,7 @@ function ChequeForm({ address, onClose }: { address: string; onClose: () => void
       <div className="olien-dialog-body olien-stack">
         <div className="olien-form-grid">
           <Field label="To" className="olien-field--wide">
-            <AddressInput value={to} book={book.data ?? []} disabled={busy} onChange={(value) => setTo(value.trim())} onPick={(entry) => setTo(entry.address)} />
+            <AddressInput value={to} book={suggestions} disabled={busy} onChange={(value) => setTo(value.trim())} onPick={(entry) => setTo(entry.address)} />
           </Field>
           <Field label="Amount (USDC)">
             <input className="olien-input num" value={amount} inputMode="decimal" placeholder="250.00" disabled={busy} onChange={(event) => setAmount(event.target.value)} />

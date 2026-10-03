@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { encodeFunctionData, type Hex } from "viem";
 import {
+  addressBookHash,
   annotate,
   checkOperation,
   chequeDigest,
@@ -142,6 +143,15 @@ test("a description that says something else is refused, not shown", () => {
   assert.match(annotate(actions, { recipients: [] }).contradiction ?? "", /describes 0 payments and the transaction makes 1 call/);
   const rule = decodeCalls([self("setThreshold", [1])], ctx);
   assert.match(annotate(rule, { recipients: [{ to: PAYEE, amount: "1000000" }] }).contradiction ?? "", /is not one/);
+});
+
+// Pinned in service/src/olien.rs as well: the service checks an entry's signature
+// against the hash it computes, so the two must be the same hash.
+test("an address book entry hashes as the service hashes it", () => {
+  const fields = { entry: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", label: "Acme Ltd", category: "Supplier", addedAt: 1_791_201_600 };
+  assert.equal(addressBookHash(10143, ACCOUNT, fields), "0xbba321448f5927f73078c7d1ffa63d1b3c3612d586cf19665eeb2fca7c7c1cb3");
+  assert.notEqual(addressBookHash(10143, ACCOUNT, { ...fields, addedAt: fields.addedAt + 1 }), addressBookHash(10143, ACCOUNT, fields), "the time is part of what is signed");
+  assert.notEqual(addressBookHash(10143, PROOF, fields), addressBookHash(10143, ACCOUNT, fields), "and the entry belongs to one account");
 });
 
 test("a cheque's digest is the token's own, and the message hash the account's", () => {
