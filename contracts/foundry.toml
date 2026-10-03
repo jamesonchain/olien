@@ -8,10 +8,11 @@ optimizer_runs = 200
 
 # Golden vectors are the shared source of truth for forge and the TS engine mirror;
 # the test harness reads them and the GenVectorHashes script writes hashes.json here.
-# The deploy script writes the address book to ../deployments.
+# The canonical test reads the pinned creation code from ../deployments/v1; nothing
+# in this project writes there.
 fs_permissions = [
     { access = "read-write", path = "../packages/vectors" },
-    { access = "read-write", path = "../deployments" },
+    { access = "read", path = "../deployments" },
     # Deployed bytecode of a P-256 verifier, so the owner tests run a real curve check.
     { access = "read", path = "./test/fixtures" },
 ]

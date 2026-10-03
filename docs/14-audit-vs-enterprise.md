@@ -489,6 +489,34 @@ one reason only: the account has no `selfdestruct` and no delegatecall out, so a
 implementation with a dead configuration at deployment. One line, and an auditor
 will otherwise spend a page explaining why it is fine.
 
+### L11. This repository could not reproduce its own deployment
+
+*Found and fixed 2026-10-04.*
+
+**What.** An account's address is a function of the factory's address, and the
+factory's of its creation code. The compiler ends creation code with a hash of the
+source paths. This repository was split out of the one v1 was deployed from, the
+contracts moved from `src/olien/` to `src/`, and so every contract built here had a
+different creation code and a different CREATE2 address: the factory at `0x06C6...`
+instead of `0xaF8c...`. The factory also carries the proxy's creation code inside it,
+with the proxy's own path hash, so even at the right factory address a rebuilt factory
+would have made accounts at different addresses. The deploy script was pointed at a
+file name that no longer existed, so it failed before it could do this.
+
+**Why it matters.** "The same address on every chain" is a safety property here and
+not a convenience: money sent to a team's address on a chain where the account does
+not exist yet is claimable only if the same factory can be put at the same address
+there. A mainnet deployed by recompiling would have broken that for every account,
+silently, and nothing in the repository would have said so.
+
+**Fix.** `deployments/v1/creation.json` holds the four creation codes v1 was deployed
+from; each is checked to predict its recorded address. `ops/deploy-olien.sh` sends
+those bytes and compiles nothing. `contracts/test/OlienCanonical.t.sol` deploys them
+and asserts that the logic in each, compiler metadata aside, is the logic of the
+source in this repository, so the pinned bytes cannot drift from the code people
+read. The script that deployed by recompiling is gone. For v2, set
+`bytecode_hash = "none"` so the address depends on the code alone.
+
 ### L10. API keys never expire
 
 **What.** `olien_api_keys` has `revoked_at` and no `expires_at`. A `propose` key

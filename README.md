@@ -11,7 +11,12 @@ Console: **https://www.olien.org**
 ## Live on Monad testnet, chain 10143
 
 Deployed 2026-09-16 through the Arachnid CREATE2 deployer, so every address is a pure
-function of a fixed salt and the creation code.
+function of a fixed salt and the creation code. That creation code is pinned in
+`deployments/v1/creation.json` and `ops/deploy-olien.sh` sends those bytes rather than
+compiling, because the compiler ends creation code with a hash of the source paths:
+the same Solidity built from this repository lands somewhere else, and a team's account
+on a new chain would not be at the address it already holds. A test keeps the pinned
+bytes and the source the same contract.
 
 | Contract | Address |
 | --- | --- |
@@ -48,7 +53,9 @@ Already cloned without them: `git submodule update --init --recursive`.
 
 ## Running it
 
-**Contracts.** 62 tests, no network needed.
+**Contracts.** 65 tests, no network needed. Three of them hold the deployed bytes to
+this source: a change that alters the account's code fails there, because that is a new
+version with new addresses and not an edit.
 
 ```sh
 cd contracts && forge test
@@ -114,6 +121,14 @@ nonce and epoch come from the file or from flags.
 ```sh
 ops/monad-check.sh              # testnet, 10143
 ops/monad-check.sh --mainnet    # mainnet, 143
+```
+
+**Deploying** to a chain. Simulates unless told otherwise, skips what is already there,
+and stops if the pinned bytes no longer predict their recorded addresses.
+
+```sh
+ops/deploy-olien.sh --rpc <url>           # say what would be deployed
+ops/deploy-olien.sh --rpc <url> --live    # send it
 ```
 
 ## Notes
