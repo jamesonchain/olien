@@ -118,7 +118,7 @@ and tested and reaches nobody until that changes.
 The contracts use submodules, so a plain clone gives a `contracts/` that will not build.
 
 ```sh
-git clone --recursive https://github.com/sQuiDbOb18/olien.git
+git clone --recursive https://github.com/jamesonchain/olien.git
 cd olien
 ```
 
