@@ -5,8 +5,8 @@ import { Lock, Plus, SlidersHorizontal, Trash2, TriangleAlert } from "lucide-rea
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { durationLabel, errorMessage, proposeSigners, proposalSummary, shortAddress, type AccountView, type SignerKind, type SignerView, type SignersProposalBody } from "@/lib/treasury";
-import { keyName, lockedByLosing, lockoutMessage, vetoRule, type Standing } from "@/lib/resilience";
+import { durationLabel, errorMessage, proposeSigners, proposalKind, proposalSummary, shortAddress, type AccountView, type SignerKind, type SignerView, type SignersProposalBody } from "@/lib/treasury";
+import { keyName, lockedByLosing, lockoutMessage, syncedCanMeet, syncedMessage, vetoRule, type Standing } from "@/lib/resilience";
 import { MemberRows, newMember, signerInputOf, usePasskeyMember, validateMembers, type MemberDraft } from "./new-account";
 import { useWalletSession } from "./wallet";
 import { AddressChip, Button, Field, InlineError, Loading, Note, Panel, PermissionTags, plural, StatusPill, Table, Tag } from "./ui";
@@ -214,8 +214,13 @@ export function OlienMembers({ address }: { address: string }) {
 
   const view = account.data;
   const approvers = view.signers.filter((signer) => signer.permissions.includes("approve")).length;
-  const changes = (pending.data ?? []).filter((row) => row.kind === "signer_change" || row.kind === "rule_change");
+  // By what the calls do, not by the kind the proposal was filed under.
+  const changes = (pending.data ?? []).filter((row) => proposalKind(row) === "Rule change");
   const writable = view.status === "live";
+  const syncedAlone = syncedCanMeet(
+    view.signers.map((signer) => ({ approve: signer.permissions.includes("approve"), synced: signer.synced })),
+    view.threshold,
+  );
 
   return (
     <div className="olien-page">
@@ -246,6 +251,11 @@ export function OlienMembers({ address }: { address: string }) {
         </div>
       </div>
 
+      {syncedAlone ? (
+        <Note tone="warn" icon={<TriangleAlert size={14} />}>
+          {syncedMessage(syncedAlone)}
+        </Note>
+      ) : null}
       {form?.kind === "add" ? <AddMemberForm address={address} account={view} onClose={() => setForm(null)} /> : null}
       {form?.kind === "remove" ? <RemoveMemberForm address={address} account={view} signer={form.signer} onClose={() => setForm(null)} /> : null}
       {form?.kind === "threshold" ? <ThresholdForm address={address} account={view} onClose={() => setForm(null)} /> : null}
@@ -285,7 +295,7 @@ export function OlienMembers({ address }: { address: string }) {
                 <strong>{signer.label}</strong>
                 {signer.mine ? <Tag tone="accent">You</Tag> : null}
               </td>
-              <td className="olien-muted">{KIND_LABELS[signer.kind] ?? signer.kind}</td>
+              <td className="olien-muted">{signer.kind === "webauthn" && signer.synced ? "Synced passkey" : (KIND_LABELS[signer.kind] ?? signer.kind)}</td>
               <td>{signer.address ? <AddressChip address={signer.address} /> : <code title={signer.signerId}>{shortAddress(signer.signerId)}</code>}</td>
               <td>
                 <PermissionTags permissions={signer.permissions} />

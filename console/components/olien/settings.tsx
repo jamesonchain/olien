@@ -12,6 +12,7 @@ import {
   addAddressBookEntry,
   durationLabel,
   errorMessage,
+  formatDay,
   formatLedgerAmount,
   formatNative,
   formatTime,
@@ -857,8 +858,14 @@ function ApiKeyRow({ address, item }: { address: string; item: ApiKey }) {
         <Pill tone={item.scope === "propose" ? "amber" : "gray"}>{scopeLabel(item.scope)}</Pill>
       </td>
       <td className="olien-mono olien-muted">olk_…{item.hint}</td>
-      <td className="olien-muted">{item.createdBy}</td>
-      <td className="olien-muted">{item.lastUsedAt ? formatTime(item.lastUsedAt) : "Never"}</td>
+      {/* A wallet member is named by its address; in full it takes the room the other columns need. */}
+      <td className="olien-muted" title={item.createdBy}>
+        {isValidAddress(item.createdBy) ? shortAddress(item.createdBy) : item.createdBy}
+      </td>
+      <td className="olien-muted">{item.lastUsedAt ? formatDay(item.lastUsedAt) : "Never"}</td>
+      <td className="olien-muted">
+        {item.expiresAt == null ? "" : item.expiresAt <= nowSeconds() ? <Pill tone="red">Expired</Pill> : null} {item.expiresAt == null ? "" : formatDay(item.expiresAt)}
+      </td>
       <td className="num">
         <Button size="sm" onClick={() => void revoke()} busy={busy} disabled={busy} icon={<Trash2 size={13} />}>
           Revoke
@@ -875,6 +882,7 @@ function ApiKeysSection({ address }: { address: string }) {
   const keys = useApiKeys(address);
   const [name, setName] = useState("");
   const [scope, setScope] = useState<ApiKeyScope>("read");
+  const [days, setDays] = useState(90);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [minted, setMinted] = useState<MintedApiKey | null>(null);
@@ -883,7 +891,7 @@ function ApiKeysSection({ address }: { address: string }) {
     setBusy(true);
     setError(null);
     try {
-      const fresh = await mintApiKey(address, name.trim(), scope);
+      const fresh = await mintApiKey(address, name.trim(), scope, days);
       setMinted(fresh);
       setName("");
       await queryClient.invalidateQueries({ queryKey: olienKeys.apiKeys(address) });
@@ -898,7 +906,8 @@ function ApiKeysSection({ address }: { address: string }) {
     <Panel title="API keys">
       <p className="olien-muted olien-section-lede">
         For payroll and accounting tools. A read key sees what you see. A propose key can also put transfers in the queue, where they need the same
-        signatures as any other. No key can sign, execute, or change who the members are.
+        signatures as any other. No key can sign, execute, or change who the members are. Every key has a last day, so one that is forgotten stops by
+        itself.
       </p>
       <form
         className="olien-inline-form"
@@ -919,6 +928,11 @@ function ApiKeysSection({ address }: { address: string }) {
         <select className="olien-input olien-input--short" value={scope} disabled={busy} onChange={(event) => setScope(event.target.value as ApiKeyScope)}>
           <option value="read">Read only</option>
           <option value="propose">Read and propose</option>
+        </select>
+        <select className="olien-input olien-input--short" value={days} disabled={busy} aria-label="How long the key lasts" onChange={(event) => setDays(Number(event.target.value))}>
+          <option value={30}>For 30 days</option>
+          <option value={90}>For 90 days</option>
+          <option value={365}>For a year</option>
         </select>
         <Button type="submit" variant="primary" disabled={busy || !name.trim()} icon={<KeyRound size={14} />}>
           {busy ? "Creating" : "Create key"}
@@ -951,7 +965,7 @@ function ApiKeysSection({ address }: { address: string }) {
       ) : !keys.data || keys.data.length === 0 ? (
         <EmptyState title="No keys" hint="A key lets a system read this account, or put payouts in the queue for the members to sign." />
       ) : (
-        <Table head={["Name", "Can", "Key", "Made by", "Last used", ""]}>
+        <Table head={["Name", "Can", "Key", "Made by", "Last used", "Expires", ""]}>
           {keys.data.map((item) => (
             <ApiKeyRow key={item.id} address={address} item={item} />
           ))}

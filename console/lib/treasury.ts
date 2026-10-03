@@ -74,6 +74,8 @@ export interface SignerView {
   permissions: Permission[];
   since: number;
   mine: boolean;
+  // Passkeys only, when the service kept what the authenticator said at enrolment.
+  synced?: boolean;
 }
 
 export interface AccountSummary {
@@ -403,6 +405,9 @@ export const linkAddress = (body: { address: string; signature: string }) =>
 export const getAccounts = () => request<AccountSummary[]>("/accounts");
 export const createAccount = (body: CreateAccountBody) => request<AccountView>("/accounts", post(body));
 export const getAccount = (address: string) => request<AccountView>(`/accounts/${address}`);
+// An Olien that is on the chain and not in this service: its rules, members and balance
+// are read from the chain. The caller has to be one of its signers.
+export const importAccount = (body: { address: string; name?: string }) => request<AccountView>("/accounts/import", post(body));
 
 export const getProposals = (address: string, statuses?: ProposalStatus[]) =>
   request<ProposalView[]>(
@@ -746,6 +751,8 @@ export interface ApiKey {
   createdBy: string;
   createdAt: number;
   lastUsedAt: number | null;
+  // The last moment the key works; absent from a service that does not expire keys.
+  expiresAt?: number | null;
 }
 
 // The key itself is in this response and in no other.
@@ -867,7 +874,7 @@ export const signCheque = (address: string, id: number, body: { signerId: string
 export const voidCheque = (address: string, id: number) => request<TreasuryCheque | void>(`/accounts/${address}/cheques/${id}/void`, post({}));
 
 export const getApiKeys = (address: string) => request<ApiKey[]>(`/accounts/${address}/api-keys`);
-export const mintApiKey = (address: string, name: string, scope: ApiKeyScope) =>
-  request<MintedApiKey>(`/accounts/${address}/api-keys`, post({ name, scope }));
+export const mintApiKey = (address: string, name: string, scope: ApiKeyScope, expiresInDays: number) =>
+  request<MintedApiKey>(`/accounts/${address}/api-keys`, post({ name, scope, expiresInDays }));
 export const revokeApiKey = (address: string, id: number) =>
   request<void>(`/accounts/${address}/api-keys/${id}`, { method: "DELETE" });
