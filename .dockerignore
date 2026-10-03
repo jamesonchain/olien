@@ -1,0 +1,9 @@
+# The image needs service/ and deployments/ and nothing else. Without this the build
+# context carries a multi-gigabyte target directory and every node_modules.
+**/target
+**/node_modules
+**/.next
+console
+contracts
+docs
+.git
