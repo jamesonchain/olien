@@ -702,8 +702,25 @@ from the chain by a signer, which makes the claim that the database is convenien
 and not authority true for the account row too; L11's pinned deployment. Live on
 olien.org already, because it needs nothing from the service: the browser runs a
 proposal's calls itself and sets the account's balance against what would leave (M2).
-Not built: the soft policy and the signed address book under it (C1's service half,
-M5), the audit trail and rate limiter (M3), the second RPC (M4).
+
+**The rest of phase 2, built 2026-10-04.** The soft policy of `06-algorithms.md` §6
+(C1, service half): tiers by amount, known destinations with a wait for new ones, and
+hours, applied to proposals and to cheques, with tightening immediate and loosening
+behind the account's config delay and cancellable by any member, which is the
+asymmetry C1 recommends for the on-chain rule. The signed address book under it (M5):
+an entry is a member's EIP-712 signature over the address, the label and the time,
+checked by the service and again by every browser, and an unsigned row counts for
+nothing. The audit trail, hash-chained per account and exportable, and a limiter on
+sessions, keys, sign-in and wrong keys (M3). A second RPC for the reads that gate
+execution, with the console asking the chain itself as a third view (M4). All of it
+waits on the same move as the rest.
+
+What phase 2 could not close, because it is the limit of a service: the policy is
+soft, and members holding the threshold's signatures can execute on the chain
+without it. A removed address book entry can be put back by whoever holds the
+database, since the signature that made it is still valid; only an on-chain list
+ends that. And a service that hides a scheduled change is still not caught by the
+console. Each of these is a line in phase 4.
 
 ## Sources
 

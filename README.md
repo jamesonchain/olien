@@ -76,13 +76,31 @@ list at first. They were found by building, not by reading.
 The console on olien.org does not talk to `service/` in this repository. It talks to
 `olien-monad-testnet-production.up.railway.app`, which is built from a different
 repository, and the service here has never been deployed. So everything below is done
-and tested and reaches nobody until that changes.
+and tested and reaches nobody until that changes. The console already carries the
+screens for all of it and shows each one only when the service it is talking to says
+it can do it, so they appear by themselves on the day of the move.
 
 - The service refuses a proposal whose description contradicts its calls.
 - It refuses to start unless the contracts it is pointed at are Olien v1.
 - A signer can open an Olien by its address, and the service rebuilds it from the chain.
 - API keys expire, ninety days out unless you choose otherwise.
 - A `Dockerfile` at the root builds the service. The image has not been built yet.
+- **A treasury policy.** A payment above an amount needs more approvals than the
+  threshold, a payment to an address nobody vouched for waits, a newly added address
+  waits a set time, and nothing runs outside set hours. Tightening it is immediate;
+  loosening it waits the account's own config delay and any member can cancel it.
+  Cheques answer to it too. It is the service's and not the chain's, and every
+  screen says so.
+- **A signed address book.** An entry is a member's signature over the address, the
+  label and the time. The service checks it and so does every browser, and a row
+  nobody signed counts for nothing. This is what the policy means by a known address.
+- **An audit trail.** Every act on an account, in order, each row carrying the hash
+  of the one before it, readable in Settings and exportable as CSV.
+- **A limiter.** Per session, per API key, per sign-in, and on wrong keys.
+- **A second RPC.** With `RPC_URL_SECONDARY` set, what decides whether a proposal can
+  run is read from two endpoints and nothing is sent while they disagree. The console
+  also asks the chain itself and stops signing if the service's picture of the
+  account differs.
 
 ### Changed for anyone working here
 
@@ -98,6 +116,8 @@ and tested and reaches nobody until that changes.
   to run the service against it. Everything service-side above was proved there.
 - **The console has tests.** `cd console && npm test`. Two of them read the source: one
   for a link to the old path, one for any screen that signs something it did not build.
+- **`docs/11-service-api.md`** has the new routes: the policy, the signed address
+  book, the audit trail, importing an account, and the limits.
 - **`npm run lint` in the console does not run.** ESLint 9 wants a config file this
   project does not have. It predates this week and is a good small thing to pick up.
 
@@ -109,9 +129,13 @@ and tested and reaches nobody until that changes.
    and proposals still collecting signatures do not carry over.
 2. **The relayer is low on MON.** `0xD6c574461d96Ee708f58Fe553049aD4f48BB983A` pays for
    executions on Monad testnet and is under the level the service calls low.
-3. **What is still open from the audit:** amount tiers and known destinations before a
-   payment runs, a signed address book, an audit trail with a rate limiter, and a second
-   RPC for the reads that decide whether a proposal is ready.
+3. **What is still open from the audit** is on the chain, and is a second version of
+   the account: a delay on large or unfamiliar payments that the account itself
+   enforces, a way for one member to stop everything in flight, a sliding window for
+   spending limits, and a recovery path for an account whose keys are lost. The
+   policy above is the blueprint for the first of those. `docs/14` has the list.
+4. **None of the service work has been tried by anyone but its author.** It passes its
+   own tests and an end-to-end run on a local chain. It has not met a real team.
 
 ## Getting it
 
@@ -134,7 +158,7 @@ version with new addresses and not an edit.
 cd contracts && forge test
 ```
 
-**Service.** 50 tests, and none of them need a database: every query is a runtime
+**Service.** 73 tests, and none of them need a database: every query is a runtime
 `sqlx::query_as`, so nothing is checked against a live schema at compile time.
 
 ```sh
@@ -156,6 +180,7 @@ cargo run
 | `DEPLOYMENTS_PATH` | `../deployments/10143.json` | Which chain this instance serves. A file with no `olien` key is refused at boot |
 | `RELAYER_PK` | none | Pays for account creation and executions. Without it the service reads and serves but cannot send |
 | `RPC_URL` | per chain | Overrides the built-in endpoint |
+| `RPC_URL_SECONDARY` | none | A second, independent endpoint for the same chain. When set, the epoch, the threshold, the signer set and the lanes are read from both, and nothing is marked ready or sent while they disagree. One that cannot be reached says nothing and holds nothing up |
 | `PORT` | `8080` | Binds `::`, dual stack |
 | `CORS_ALLOWED_ORIGINS` | empty, meaning permissive | Comma separated. Set it in production to the console's origin |
 | `MEMBERS_URL` | none | An optional directory that resolves `@handle` to an address. Without one, members are named by address |

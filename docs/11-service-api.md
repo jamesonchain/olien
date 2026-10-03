@@ -19,8 +19,13 @@ chain or the relayer failed.
 ## Which chain
 
 ```
-GET /api/treasury/chain   -> { chainId, name, native: { symbol, decimals }, explorerUrl, usdc, eurc, entryPoint, factory, implementation }
+GET /api/treasury/chain   -> { chainId, name, native: { symbol, decimals }, explorerUrl, usdc, eurc, entryPoint, factory, implementation, features }
 ```
+
+`features` names what this service does beyond the first version of this API:
+`import`, `key-expiry`, `synced`, `signed-book`, `policy`, `audit`. A client offers a
+thing only when it is named, so one client build is right against an older service
+and a newer one.
 
 Public, no session. One deployment of the service runs against one chain, chosen
 by its deployment file; the console is built for one chain too
@@ -361,7 +366,8 @@ vector (`contracts/test/olien/OlienVectors.t.sol`).
 ```
 GET  /api/treasury/accounts/{address}/ledger?limit=100&before=<id>   -> [LedgerEntry]
 GET  /api/treasury/accounts/{address}/address-book                     -> [AddressBookEntry]
-POST /api/treasury/accounts/{address}/address-book  { address, label, category? }  -> AddressBookEntry
+POST /api/treasury/accounts/{address}/address-book  { address, label, category?, signerId, signature, addedAt }  -> AddressBookEntry
+DELETE /api/treasury/accounts/{address}/address-book/{entry}           -> 204
 ```
 
 `LedgerEntry`: `{ id, tx, logIndex, token, symbol, decimals, direction: "in" |
@@ -376,9 +382,76 @@ A reverted operation the service sent also moves its proposal to `failed`. For
 transfers, `memo` and `counterpartyLabel` come from the proposal's intent and the
 address book.
 
-`AddressBookEntry`: `{ address, label, category, createdAt }`; `category` is an
-empty string when none was given. Posting an address that exists replaces its
-label and category.
+`AddressBookEntry`: `{ address, label, category, createdAt, signerId, signature,
+addedAt }`; `category` is an empty string when none was given. Posting an address
+that exists replaces it.
+
+An entry is signed. The member signs `AddressBookEntry(address entry,string
+label,string category,uint48 addedAt)` in the account's own EIP-712 domain, a struct
+the account never verifies, so the signature is worth nothing on the chain. The
+service checks it as it checks a confirmation, refuses a signer who cannot approve,
+and refuses an `addedAt` more than ten minutes from its own clock, because that time
+is what a new destination's wait is counted from. Every client is handed the
+signature and checks it again before it shows the label or treats the address as
+known: the service stores the book and is the one party that must not be able to
+write in it. A row with no signature, or one signed by someone who is no longer a
+signer, labels nothing and makes nothing known. Any member deletes an entry at once.
+
+## Treasury policy
+
+```
+GET    /api/treasury/accounts/{address}/policy          -> PolicyView
+PUT    /api/treasury/accounts/{address}/policy  Policy  -> PolicyView
+DELETE /api/treasury/accounts/{address}/policy/pending  -> PolicyView
+```
+
+`Policy`: `{ tiers: [{ above, approvals }], requireKnownDestination,
+newDestinationDelay, hours: { days, start, end, utcOffset } | null }`. `above` is in
+the token's smallest unit; `days` are 0 for Sunday to 6; `start` and `end` are
+minutes of the day at `utcOffset` minutes from UTC. `PolicyView`: `{ policy,
+pending: { policy, effectiveAt, proposedBy, loosens } | null, changeDelay }`.
+
+The account decides who may approve and how many it takes; this decides how much, to
+whom and when (`06-algorithms.md` §6). A payment whose total is above a tier needs
+that tier's approvals, never fewer than the threshold and never more than there are
+approvers. With `requireKnownDestination`, a payment waits until its recipient is a
+signed address book entry at least `newDestinationDelay` old; the account's own
+sub-accounts are always known. With `hours`, a payment waits for them. A call the
+service cannot read as a payment is held to the highest tier, and its target has to
+be known. A change to the account's own rules is not money and is never held.
+
+A proposal the policy holds stays `open` and carries `softRules: [{ rule, text,
+until }]`, with `required` raised to what the tier asks; `execute` answers 409 with
+the reason. Cheques answer to the same rules before they are issued.
+
+A `PUT` that only tightens takes effect at once. One that loosens anything waits the
+account's `configDelay` as `pending`, and any member may `DELETE` it in that time; a
+second loosening cannot be stacked on the first. Only a signer may change the
+policy.
+
+It is soft. Members holding the threshold's signatures can execute on the chain
+without this service, and every client says so beside the rule.
+
+## Audit trail
+
+```
+GET /api/treasury/accounts/{address}/audit?limit=200&before=<id>&format=csv   -> { rows, intact } | text/csv
+```
+
+Who did what, newest first: accounts, proposals, approvals, executions, the address
+book, the policy, keys, webhooks and cheques. A `read` key may fetch it. Each row is
+`{ id, at, actor, via, action, subject, detail, previous, hash }`, where `hash` is
+the keccak256 of `previous` and the row's canonical JSON, so the rows of one account
+form a chain. `intact` is whether the rows returned hash to what they say and each
+names the one before it; the CSV carries it in the `x-olien-audit-intact` header.
+
+## Limits
+
+Requests are limited per caller, in the process: a session at 20 a second with a
+burst of 300, an API key at 2 a second with a burst of 60, signing in at one every
+two seconds per address with a burst of 20. Keys that do not exist are counted per
+address they came from, ten and then one every ten seconds, and that count is
+checked before the key is. A limited request answers 429 with `retry-after`.
 
 ## Payroll runs
 
