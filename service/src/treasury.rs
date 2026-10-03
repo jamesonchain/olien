@@ -1491,7 +1491,58 @@ pub async fn create_proposal(pool: &PgPool, treasury: &Treasury, user: i64, addr
         "transfer" | "batch" | "signer_change" | "rule_change" | "limit_change" | "cancel" | "contract_call" => body.kind.clone(),
         other => return Err(bad(format!("unknown kind {other}"))),
     };
-    insert_proposal(pool, client, treasury.chain_id, &ctx, user, kind, body.intent.unwrap_or_else(|| json!({})), calls, body.nonce_key, body.sequence, body.valid_after, body.valid_until, via_key).await
+    let intent = body.intent.unwrap_or_else(|| json!({}));
+    describes(&kind, &intent, &calls, account, &client.tokens()).map_err(bad)?;
+    insert_proposal(pool, client, treasury.chain_id, &ctx, user, kind, intent, calls, body.nonce_key, body.sequence, body.valid_after, body.valid_until, via_key).await
+}
+
+/// A call as the payment it is, when it is one: a canonical `transfer(to, amount)` on
+/// one of the treasury's tokens, carrying no value.
+fn payment_of(call: &Call, tokens: &[Address]) -> Option<(Address, U256)> {
+    if !tokens.contains(&call.to) || !call.value.is_zero() {
+        return None;
+    }
+    let transfer = olien::IERC20::transferCall::abi_decode(&call.data).ok()?;
+    // Decoding tolerates trailing bytes and dirty padding; only the bytes that encode
+    // back to themselves are the payment they look like.
+    (transfer.abi_encode() == call.data.as_ref()).then_some((transfer.to, transfer.amount))
+}
+
+/// Whether a proposal's kind and intent say what its calls do.
+///
+/// The kind and the intent are the proposer's words, kept beside the calls so the queue
+/// can read "September payroll" instead of twelve transfers. Anything that renders them
+/// is trusting them, and the generic route took any words with any calls, from any
+/// member and from any API key that may propose. So words that contradict the calls
+/// are refused here. A client still must not rely on this: the console reads the
+/// calldata itself, because a service that has been compromised checks nothing.
+pub(crate) fn describes(kind: &str, intent: &Value, calls: &[Call], account: Address, tokens: &[Address]) -> Result<(), String> {
+    let payments: Vec<Option<(Address, U256)>> = calls.iter().map(|call| payment_of(call, tokens)).collect();
+    let all_payments = !calls.is_empty() && payments.iter().all(Option::is_some);
+    let all_own = !calls.is_empty() && calls.iter().all(|call| call.to == account);
+    let honest = match kind {
+        "transfer" => all_payments && calls.len() == 1,
+        "batch" | "payroll" => all_payments,
+        "signer_change" | "rule_change" | "limit_change" | "cancel" => all_own,
+        _ => true,
+    };
+    if !honest {
+        return Err(format!("a {kind} proposal's calls must be what the kind says; file anything else as contract_call"));
+    }
+    let Some(recipients) = intent.get("recipients") else { return Ok(()) };
+    let recipients = recipients.as_array().ok_or("intent.recipients must be a list")?;
+    if recipients.len() != calls.len() {
+        return Err(format!("the intent describes {} payments and there are {} calls", recipients.len(), calls.len()));
+    }
+    for (index, (claimed, actual)) in recipients.iter().zip(&payments).enumerate() {
+        let to = claimed.get("to").and_then(Value::as_str).and_then(|t| t.trim().parse::<Address>().ok());
+        let amount = claimed.get("amount").and_then(Value::as_str).and_then(|a| U256::from_str_radix(a.trim(), 10).ok());
+        match (actual, to, amount) {
+            (Some((paid_to, paid)), Some(to), Some(amount)) if *paid_to == to && *paid == amount => {}
+            _ => return Err(format!("the intent's recipient {} is not what call {} pays", index + 1, index + 1)),
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1995,10 +2046,18 @@ async fn build_view(
     })
 }
 
-// USDC on Arc is at a fixed address on every network of Circle's; the config carries
-// it too, but the decoder runs where no client is at hand.
+// The decoder and the ledger run where no client is at hand, so the chain's USDC is
+// set once at boot. One process serves one chain, which is what makes a process-wide
+// value honest here. Before this it was Arc's address alone, so on Monad a payment
+// decoded as a raw call and a ledger row named its token "token".
+static CHAIN_USDC: std::sync::OnceLock<Address> = std::sync::OnceLock::new();
+
+pub fn set_chain_usdc(usdc: Address) {
+    let _ = CHAIN_USDC.set(usdc);
+}
+
 fn book_usdc() -> Address {
-    "0x3600000000000000000000000000000000000000".parse().unwrap_or(Address::ZERO)
+    CHAIN_USDC.get().copied().unwrap_or_else(|| "0x3600000000000000000000000000000000000000".parse().unwrap_or(Address::ZERO))
 }
 
 /// The ledger stores the token that moved, so a row can name itself. Anything we do
@@ -2745,6 +2804,63 @@ mod tests {
         let (input, key) = signer_input(&ecdsa).unwrap();
         assert_eq!(input.key.len(), 20);
         assert_eq!(key.handle(), "0x12808a601475b87ce7b343a18f11062cc74eae81");
+    }
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+    use alloy::primitives::address;
+
+    const USDC: Address = address!("534b2f3A21130d7a60830c2Df862319e593943A3");
+    const ACCOUNT: Address = address!("00000000000000000000000000000000000000AB");
+    const ACME: Address = address!("3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+    const OTHER: Address = address!("90F79bf6EB2c4f870365E785982E1f101E93b906");
+
+    fn pay(to: Address, amount: u64) -> Call {
+        Call { to: USDC, value: U256::ZERO, data: calldata::usdc_transfer(to, U256::from(amount)) }
+    }
+
+    fn says(to: Address, amount: &str) -> Value {
+        json!({ "recipients": [{ "to": format!("{to:#x}"), "amount": amount, "label": "Acme Ltd" }] })
+    }
+
+    #[test]
+    fn a_description_that_matches_its_calls_is_kept() {
+        assert!(describes("transfer", &says(ACME, "250000000"), &[pay(ACME, 250_000_000)], ACCOUNT, &[USDC]).is_ok());
+        assert!(describes("contract_call", &json!({}), &[pay(ACME, 1)], ACCOUNT, &[USDC]).is_ok(), "no description claims nothing");
+    }
+
+    // The proposal that reads "250 USDC to Acme" and pays someone else a thousand times
+    // that. This is the one the console used to show as written.
+    #[test]
+    fn a_description_naming_another_recipient_or_amount_is_refused() {
+        let calls = [pay(OTHER, 250_000_000_000)];
+        assert!(describes("transfer", &says(ACME, "250000000"), &calls, ACCOUNT, &[USDC]).is_err());
+        assert!(describes("contract_call", &says(ACME, "250000000"), &calls, ACCOUNT, &[USDC]).is_err(), "whatever kind it is filed under");
+        assert!(describes("transfer", &says(OTHER, "250000000"), &calls, ACCOUNT, &[USDC]).is_err(), "the right recipient with the wrong amount");
+        assert!(describes("batch", &json!({ "recipients": [] }), &calls, ACCOUNT, &[USDC]).is_err(), "a different number of payments");
+    }
+
+    #[test]
+    fn a_kind_is_held_to_what_its_calls_do() {
+        let rule = Call { to: ACCOUNT, value: U256::ZERO, data: calldata::set_threshold(1) };
+        assert!(describes("rule_change", &json!({}), std::slice::from_ref(&rule), ACCOUNT, &[USDC]).is_ok());
+        assert!(describes("transfer", &json!({}), std::slice::from_ref(&rule), ACCOUNT, &[USDC]).is_err(), "a rule change filed as a payment");
+        assert!(describes("rule_change", &json!({}), &[pay(ACME, 1)], ACCOUNT, &[USDC]).is_err(), "a payment filed as a rule change");
+        assert!(describes("transfer", &json!({}), &[pay(ACME, 1), pay(ACME, 1)], ACCOUNT, &[USDC]).is_err(), "two payments are a batch");
+    }
+
+    #[test]
+    fn only_a_canonical_transfer_on_a_known_token_is_a_payment() {
+        let mut padded = pay(ACME, 1);
+        padded.data = [padded.data.as_ref(), &[0u8]].concat().into();
+        assert!(payment_of(&padded, &[USDC]).is_none(), "a trailing byte");
+        let mut carrying = pay(ACME, 1);
+        carrying.value = U256::from(1u64);
+        assert!(payment_of(&carrying, &[USDC]).is_none(), "money riding along");
+        assert!(payment_of(&pay(ACME, 1), &[ACCOUNT]).is_none(), "a token this treasury does not hold");
+        assert_eq!(payment_of(&pay(ACME, 7), &[USDC]), Some((ACME, U256::from(7u64))));
     }
 }
 

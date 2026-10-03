@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("migrations applied");
 
+    treasury::set_chain_usdc(config.usdc);
     let treasury = build_treasury(&config)?;
 
     if treasury.client.is_some() {
