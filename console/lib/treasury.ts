@@ -4,9 +4,10 @@
 // token's smallest unit (USDC has 6 decimals), times are unix seconds, addresses are
 // lowercase hex, hashes and signer ids are 0x plus 64 hex digits.
 
-import { formatUnits, hashTypedData, isAddress } from "viem";
+import { formatUnits, isAddress } from "viem";
 import { authFetch } from "./session";
-import { nativeSymbol } from "./chain";
+import { chainSpec, decodeContext, nativeSymbol } from "./chain";
+import { annotate, decodeCalls, kindOf, summarise, transactionHash, transactionTypedData, type TransactionFields } from "./signing";
 
 export type Hex = `0x${string}`;
 
@@ -613,70 +614,30 @@ export function statusLabel(status: ProposalStatus): string {
   return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
-export const KIND_LABELS: Record<ProposalKind, string> = {
-  transfer: "Payment",
-  batch: "Batch",
-  payroll: "Payroll",
-  signer_change: "Signer change",
-  rule_change: "Rule change",
-  limit_change: "Spending limit",
-  cancel: "Cancellation",
-  contract_call: "Contract call",
-};
-
-export function kindLabel(kind: ProposalKind): string {
-  return KIND_LABELS[kind] ?? kind;
+// What a proposal asks to be signed: the message of its typed data and nothing else.
+// These are the fields that are hashed, so they are the fields that are decoded and
+// shown. The proposal's own `calls`, `kind`, `decoded` and `intent` are the service's
+// account of it; the domain it came with is not used at all.
+export function signedFields(proposal: ProposalView): TransactionFields {
+  const { message } = proposal.typedData;
+  return { nonce: message.nonce, epoch: message.epoch, calls: message.calls, validAfter: message.validAfter, validUntil: message.validUntil };
 }
 
-// The typed data as viem and a wallet want it: EIP712Domain dropped (viem derives it
-// from the domain), uint256 fields as bigint, addresses and bytes as hex.
-export interface SignableTypedData {
-  domain: { name: string; version: string; chainId: number; verifyingContract: Hex };
-  types: Record<string, TypedDataField[]>;
-  primaryType: "Transaction";
-  message: {
-    nonce: bigint;
-    epoch: number;
-    calls: { to: Hex; value: bigint; data: Hex }[];
-    validAfter: number;
-    validUntil: number;
-  };
-}
-
-export function typedDataFor(proposal: ProposalView): SignableTypedData {
-  const { domain, types, message } = proposal.typedData;
-  const stripped: Record<string, TypedDataField[]> = {};
-  for (const [name, fields] of Object.entries(types)) {
-    if (name !== "EIP712Domain") stripped[name] = fields;
-  }
-  return {
-    domain: {
-      name: domain.name,
-      version: domain.version,
-      chainId: domain.chainId,
-      verifyingContract: domain.verifyingContract as Hex,
-    },
-    types: stripped,
-    primaryType: "Transaction",
-    message: {
-      nonce: BigInt(message.nonce),
-      epoch: message.epoch,
-      calls: message.calls.map((call) => ({ to: call.to as Hex, value: BigInt(call.value), data: call.data as Hex })),
-      validAfter: message.validAfter,
-      validUntil: message.validUntil,
-    },
-  };
+// The typed data a wallet signs for a proposal of `account`, under this console's own
+// chain. A proposal made for another account or chain then fails the hash check.
+export function typedDataFor(proposal: ProposalView, account: string) {
+  return transactionTypedData(chainSpec.id, account, signedFields(proposal));
 }
 
 // The hash a hardware wallet shows. Signing is refused when it differs from the
-// service's txHash, so a wrong or tampered typedData never gets a signature.
-export function proposalHash(proposal: ProposalView): Hex {
-  return hashTypedData(typedDataFor(proposal));
+// proposal's txHash, so what is displayed is always what is signed.
+export function proposalHash(proposal: ProposalView, account: string): Hex {
+  return transactionHash(chainSpec.id, account, signedFields(proposal));
 }
 
-export function hashMatches(proposal: ProposalView): boolean {
+export function hashMatches(proposal: ProposalView, account: string): boolean {
   try {
-    return proposalHash(proposal).toLowerCase() === proposal.txHash.toLowerCase();
+    return proposalHash(proposal, account).toLowerCase() === proposal.txHash.toLowerCase();
   } catch {
     return false;
   }
@@ -696,17 +657,27 @@ export function hashParam(value: string): string | null {
   return /^0x[0-9a-fA-F]{64}$/.test(value) ? value.toLowerCase() : null;
 }
 
+// A proposal in one line, from what its calldata does. The proposer's own words, a
+// payroll's name, are added only when they agree with it.
 export function proposalSummary(proposal: ProposalView): string {
-  // A payroll run is known by its name, not by its dozen transfer calls.
-  const payroll = proposal.intent?.payroll as { name?: string } | undefined;
-  const recipients = proposal.intent?.recipients;
-  if (payroll?.name && Array.isArray(recipients)) {
-    return `${payroll.name}: ${recipients.length} ${recipients.length === 1 ? "person" : "people"}`;
+  try {
+    const ctx = decodeContext(proposal.account);
+    const actions = decodeCalls(signedFields(proposal).calls, ctx);
+    const described = annotate(actions, proposal.intent);
+    const summary = summarise(actions, ctx);
+    if (described.contradiction) return `Mislabelled: ${summary}`;
+    return described.payrollName ? `${described.payrollName}: ${summary}` : summary;
+  } catch {
+    return "A transaction this console could not read";
   }
-  const first = proposal.decoded[0];
-  if (proposal.decoded.length === 1 && first) return first.summary;
-  if (proposal.decoded.length > 1) return `${proposal.decoded.length} calls: ${proposal.decoded.map((call) => call.summary).join("; ")}`;
-  return `${proposal.calls.length} ${proposal.calls.length === 1 ? "call" : "calls"}`;
+}
+
+export function proposalKind(proposal: ProposalView): string {
+  try {
+    return kindOf(decodeCalls(signedFields(proposal).calls, decodeContext(proposal.account)));
+  } catch {
+    return "Transaction";
+  }
 }
 
 // Spending limits: the console sends the target limit and the service encodes the

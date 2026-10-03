@@ -4,7 +4,7 @@ import { ArrowLeftRight } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
-import { errorMessage, formatTime, kindLabel, proposalSummary, type ProposalStatus, type ProposalView } from "@/lib/treasury";
+import { errorMessage, formatTime, proposalKind, proposalSummary, type ProposalStatus, type ProposalView } from "@/lib/treasury";
 import { EmptyState, InlineError, Initials, Loading, Panel, proposerLabel, StatusPill, Table, Tabs } from "./ui";
 import { ACTIVE_STATUSES, CLOSED_STATUSES, useProposals } from "./use-olien";
 
@@ -38,7 +38,7 @@ export function TransactionsTable({
               <Link href={href} className="olien-row-title">
                 {proposalSummary(row)}
               </Link>
-              <small className="olien-muted">{kindLabel(row.kind)}</small>
+              <small className="olien-muted">{proposalKind(row)}</small>
             </td>
             <td>
               <StatusPill status={row.status} />

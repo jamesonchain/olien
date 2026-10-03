@@ -32,6 +32,8 @@ import { accountError, applyProposal, olienKeys, useAddressBook, useCheques, use
 import { friendlyPasskeyError, knownPasskeys, passkeySupported, signWithPasskey } from "@/lib/passkey";
 import { friendlyWalletError, useWalletSession, walletSigner } from "./wallet";
 import { type AccountView } from "@/lib/treasury";
+import { chainSpec, olienUsdcAddress } from "@/lib/chain";
+import { chequeDigest, messageHash, messageTypedData } from "@/lib/signing";
 
 const PERIODS: { id: PayrollPeriod; label: string }[] = [
   { id: "none", label: "Run by hand" },
@@ -273,18 +275,25 @@ function ChequeRow({ address, account, cheque }: { address: string; account: Acc
     await queryClient.invalidateQueries({ queryKey: olienKeys.cheques(address) });
   }
 
+  // A cheque is the account vouching for a hash, and the token pays whoever presents
+  // it. So the hash is derived here from the recipient, amount and dates on this row.
+  // One the service supplied could be the digest of a different cheque, or of
+  // anything else the account can be made to vouch for.
+  function localCheque() {
+    const digest = chequeDigest({ chainId: chainSpec.id, token: olienUsdcAddress, from: address, to: cheque.to, value: cheque.amount, validAfter: cheque.validAfter, validBefore: cheque.validBefore, nonce: cheque.nonce });
+    const hash = messageHash(chainSpec.id, address, digest);
+    if (digest.toLowerCase() !== cheque.digest.toLowerCase() || hash.toLowerCase() !== cheque.messageHash.toLowerCase()) {
+      throw new Error("This cheque's hash is not the hash of the recipient, amount and dates shown. Nothing was signed.");
+    }
+    return { typedData: messageTypedData(chainSpec.id, address, digest), hash };
+  }
+
   async function signWithWallet() {
     if (!wallet.address || !mySigner) return;
     setBusy("wallet");
     setError(null);
     try {
-      const { domain, types, message } = cheque.typedData;
-      const signature = await signTypedDataAsync({
-        domain: { ...domain, verifyingContract: domain.verifyingContract as Hex },
-        types: { Message: types.Message },
-        primaryType: "Message",
-        message: { hash: message.hash as Hex },
-      });
+      const signature = await signTypedDataAsync(localCheque().typedData);
       await signCheque(address, cheque.id, { signerId: signerIdFor(wallet.address), signature });
       await refresh();
     } catch (cause) {
@@ -298,7 +307,7 @@ function ChequeRow({ address, account, cheque }: { address: string; account: Acc
     setBusy("passkey");
     setError(null);
     try {
-      const result = await signWithPasskey(cheque.messageHash as Hex, passkeys.map((s) => ({ signerId: s.signerId, x: s.x, y: s.y })));
+      const result = await signWithPasskey(localCheque().hash, passkeys.map((s) => ({ signerId: s.signerId, x: s.x, y: s.y })));
       await signCheque(address, cheque.id, result);
       await refresh();
     } catch (cause) {

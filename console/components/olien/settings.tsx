@@ -2,6 +2,7 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowDownLeft, ArrowUpRight, Download, KeyRound, Lock, Plus, Radio, Send, Trash2, TriangleAlert } from "lucide-react";
+import { encodeFunctionData } from "viem";
 import { useSendTransaction } from "wagmi";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -17,6 +18,7 @@ import {
   formatUsdc,
   getLedger,
   isValidAddress,
+  nowSeconds,
   ledgerCsv,
   parseUsdc,
   proposeLimit,
@@ -49,7 +51,8 @@ import { AddressChip, Button, CopyButton, cx, DurationInput, EmptyState, Field, 
 import { accountError, applyProposal, olienKeys, useAddressBook, useApiKeys, useLedger, useOlienAccount, useWebhookDeliveries, useWebhooks } from "./use-olien";
 import { AddressInput } from "./recipients";
 import { friendlyWalletError, useOlienChain, useWalletSession, walletSigner } from "./wallet";
-import { chainName, chainSpec } from "@/lib/chain";
+import { chainName, chainSpec, olienPublicClient } from "@/lib/chain";
+import { checkOperation, OLIEN_ABI } from "@/lib/signing";
 import { friendlyPasskeyError, knownPasskeys, passkeySupported, signWithPasskey } from "@/lib/passkey";
 import { delayWarnings } from "@/lib/resilience";
 
@@ -325,6 +328,10 @@ function SpendForm({ address, account, limit, onClose }: { address: string; acco
     return { to: to.toLowerCase(), amount: units };
   }
 
+  // spend(id, to, amount) on this account, from what was typed in this form. Both ways
+  // of paying send or sign exactly this and nothing the service wrote.
+  const spendData = (input: { to: string; amount: string }) => encodeFunctionData({ abi: OLIEN_ABI, functionName: "spend", args: [BigInt(limit.id), input.to as Hex, BigInt(input.amount)] });
+
   async function finish(tx: string) {
     setSent(tx);
     // The indexer sees the Spent event within an interval; the balance and the
@@ -338,9 +345,11 @@ function SpendForm({ address, account, limit, onClose }: { address: string; acco
     setError(null);
     setBusy("wallet");
     try {
-      const plan = await planSpend(address, limit.id, { ...input, signerId: mySigner.signerId });
+      // The service is asked only whether the limit allows it; its answer carries a
+      // call, and that call is not the one sent.
+      await planSpend(address, limit.id, { ...input, signerId: mySigner.signerId });
       await ensureChain();
-      const tx = await sendTransactionAsync({ to: plan.call.to as Hex, data: plan.call.data as Hex });
+      const tx = await sendTransactionAsync({ to: address as Hex, data: spendData(input) });
       await finish(tx);
     } catch (cause) {
       setError(friendlyWalletError(cause));
@@ -358,7 +367,11 @@ function SpendForm({ address, account, limit, onClose }: { address: string; acco
     try {
       const plan = await planSpend(address, limit.id, { ...input, signerId: first.signerId });
       if (!plan.operation) throw new Error("The service did not prepare an operation for this signer.");
-      const signed = await signWithPasskey(plan.operation.hash as Hex, passkeys.map((signer) => ({ signerId: signer.signerId, x: signer.x, y: signer.y })));
+      // A passkey signs whatever hash it is handed and shows its holder nothing, so
+      // the hash is computed here, from an operation checked to be this spend alone.
+      const gasPrice = await olienPublicClient.getGasPrice().catch(() => null);
+      const operation = checkOperation({ chainId: chainSpec.id, account: address, operation: plan.operation.operation, expected: spendData(input), now: nowSeconds(), gasPrice });
+      const signed = await signWithPasskey(operation.hash, passkeys.map((signer) => ({ signerId: signer.signerId, x: signer.x, y: signer.y })));
       const receipt = await submitOperation(address, { operation: plan.operation.operation, signerId: signed.signerId, signature: signed.signature });
       await finish(receipt.txHash);
     } catch (cause) {

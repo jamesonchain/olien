@@ -7,6 +7,7 @@ import { useAccount, useConnect, useDisconnect, useSignMessage, useSwitchChain }
 import { useSession } from "@/components/session-provider";
 import { olienChain } from "@/lib/chain";
 import { signInWithWallet, walletChallenge } from "@/lib/session";
+import { loginMessage } from "@/lib/signing";
 import { errorMessage, sameAddress, shortAddress, type AccountView, type SignerView } from "@/lib/treasury";
 import { Button, Dialog, InlineError, Spinner } from "./ui";
 import { olienKeys } from "./use-olien";
@@ -38,7 +39,11 @@ export function useSignIn() {
       try {
         const lower = address.toLowerCase();
         const challenge = await walletChallenge(lower);
-        const signature = await signMessageAsync({ message: challenge.message });
+        // Built here from the nonce, so what the wallet shows is always a sign-in and
+        // never some other text the service chose to have signed.
+        const message = loginMessage(lower, challenge.nonce, challenge.expiresAt);
+        if (message !== challenge.message) throw new Error("The sign-in challenge does not read as expected. Nothing was signed.");
+        const signature = await signMessageAsync({ message });
         await signInWithWallet(lower, challenge.nonce, signature);
         await queryClient.invalidateQueries({ queryKey: olienKeys.all });
         return true;

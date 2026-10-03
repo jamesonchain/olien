@@ -5,8 +5,10 @@ import { Ban, Check, Circle, KeyRound, Lock, Play, Trash2, X } from "lucide-reac
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { encodeFunctionData } from "viem";
 import { useSendTransaction, useSignTypedData } from "wagmi";
-import { chainName, nativeSymbol, olienPublicClient as publicClient } from "@/lib/chain";
+import { chainName, chainSpec, decodeContext, nativeSymbol, olienPublicClient as publicClient } from "@/lib/chain";
+import { annotate, checkOperation, decodeCalls, describeAction, formatAmount, kindOf, OLIEN_ABI, type Action as CallAction, type Annotation, type DecodeContext } from "@/lib/signing";
 import {
   cancelProposal,
   confirmProposal,
@@ -15,21 +17,20 @@ import {
   executeProposal,
   executeScheduled,
   formatTime,
-  formatUsdc,
   getProposal,
+  nowSeconds,
   prepareVetoOperation,
   submitOperation,
   hashMatches,
-  kindLabel,
   proposalHash,
   proposalSummary,
   shortAddress,
+  signedFields,
   signerIdFor,
   typedDataFor,
   type AccountView,
   type Hex,
   type ProposalView,
-  type RecipientInput,
 } from "@/lib/treasury";
 import { AddressChip, Button, CopyButton, Countdown, cx, Disclosure, InlineError, KeyValue, Loading, Note, Panel, plural, proposerLabel, Spinner, StatusPill, Tag, TxChip } from "./ui";
 import { accountError, applyProposal, olienKeys, useNow, useOlienAccount, useProposal, useVetoCall } from "./use-olien";
@@ -38,11 +39,49 @@ import { friendlyWalletError, useOlienChain, useWalletSession, walletSigner } fr
 
 const SIGNABLE = ["open", "ready", "blocked", "failed"];
 
-function transferRecipients(view: ProposalView): RecipientInput[] | null {
-  if (view.kind !== "transfer" || !view.intent) return null;
-  const recipients = view.intent.recipients;
-  if (!Array.isArray(recipients)) return null;
-  return recipients.filter((entry): entry is RecipientInput => Boolean(entry && typeof entry === "object" && typeof (entry as RecipientInput).to === "string"));
+const DANGER_NOTES: Record<string, string> = {
+  setImplementation: "Whoever controls that code controls this account. Check the address against a source you trust.",
+  freezeImplementation: "This cannot be undone: the account can never be upgraded afterwards.",
+  setDelays: "With no delay, rule changes take effect at once and the veto never fires.",
+};
+
+// One call of the transaction, as this console read it from the calldata. The address
+// is always shown in full: a label is somebody's claim about an address, so it sits
+// beside the address and never in its place.
+function ActionRow({ index, action, note, ctx }: { index: number; action: CallAction; note: Annotation | null; ctx: DecodeContext }) {
+  const party = action.type === "transfer" || action.type === "native" || action.type === "unreadable" ? action.to : action.type === "allowance" ? action.spender : null;
+  const amount =
+    action.type === "transfer"
+      ? `${formatAmount(action.amount, action.token.decimals)} ${action.token.symbol}`
+      : action.type === "native"
+        ? `${formatAmount(action.amount, ctx.native.decimals)} ${ctx.native.symbol}`
+        : null;
+  const warn = action.type === "unreadable" || action.type === "allowance" || (action.type === "rule" && action.danger);
+  return (
+    <li className={cx("olien-call", warn && "is-warn")}>
+      <span className="olien-call-index">{index + 1}</span>
+      <div className="olien-call-body">
+        {amount ? (
+          <strong className="num">{amount}</strong>
+        ) : action.type === "unreadable" ? (
+          <strong>Unreadable call{action.selector ? ` (${action.selector}, ${action.bytes} bytes)` : ""}</strong>
+        ) : (
+          <strong>{describeAction(action, ctx)}</strong>
+        )}
+        {party ? (
+          <span>
+            {amount || action.type === "unreadable" ? "to " : ""}
+            <AddressChip address={party} full />
+          </span>
+        ) : null}
+        {note?.label ? <small className="olien-muted">The proposer calls this address &ldquo;{note.label}&rdquo;.</small> : null}
+        {note?.memo ? <small className="olien-muted">Memo: {note.memo}</small> : null}
+        {action.type === "unreadable" ? <small className="olien-call-warn">This console cannot read this call: it is {action.why}. Its effect is whatever that contract does with it.</small> : null}
+        {action.type === "allowance" ? <small className="olien-call-warn">An allowance is not a payment. It lets that address move the money later, with no further approval.</small> : null}
+        {action.type === "rule" && action.danger ? <small className="olien-call-warn">{DANGER_NOTES[action.name] ?? "Read this change twice."}</small> : null}
+      </div>
+    </li>
+  );
 }
 
 function ResultBanner({ address, view }: { address: string; view: ProposalView }) {
@@ -156,7 +195,9 @@ function VetoControls({ address, view, account }: { address: string; view: Propo
         setError(`Your wallet needs a little ${nativeSymbol} on ${chainName} for gas before it can veto.`);
         return;
       }
-      const hash = await sendTransactionAsync({ to: vetoCall.data.to as Hex, data: vetoCall.data.data as Hex });
+      // Built here rather than taken from the service: the wallet sends whatever these
+      // two values are, and a veto is only ever veto(hash) to this account.
+      const hash = await sendTransactionAsync({ to: address as Hex, data: encodeFunctionData({ abi: OLIEN_ABI, functionName: "veto", args: [view.txHash as Hex] }) });
       setSent(hash);
       await waitForVeto();
     } catch (cause) {
@@ -175,7 +216,12 @@ function VetoControls({ address, view, account }: { address: string; view: Propo
       // The hash does not depend on which signer answers, so prepare for one and let
       // any of them sign; the submit names the one that did.
       const prepared = await prepareVetoOperation(address, view.txHash, first.signerId);
-      const signed = await signWithPasskey(prepared.hash as Hex, passkeyVetoers.map((signer) => ({ signerId: signer.signerId, x: signer.x, y: signer.y })));
+      // A passkey signs whatever hash it is handed and shows its holder nothing, so
+      // the hash is computed here, from an operation checked to be this veto alone.
+      const gasPrice = await publicClient.getGasPrice().catch(() => null);
+      const expected = encodeFunctionData({ abi: OLIEN_ABI, functionName: "veto", args: [view.txHash as Hex] });
+      const operation = checkOperation({ chainId: chainSpec.id, account: address, operation: prepared.operation, expected, now: nowSeconds(), gasPrice });
+      const signed = await signWithPasskey(operation.hash, passkeyVetoers.map((signer) => ({ signerId: signer.signerId, x: signer.x, y: signer.y })));
       const receipt = await submitOperation(address, { operation: prepared.operation, signerId: signed.signerId, signature: signed.signature });
       setSent(receipt.txHash);
       await waitForVeto();
@@ -248,6 +294,7 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
   const { signTypedDataAsync } = useSignTypedData();
   const [busy, setBusy] = useState<Action | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   if (account.isLoading || proposal.isLoading) return <Loading label="Loading the transaction" />;
@@ -256,7 +303,22 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
 
   const view = proposal.data;
   const acct = account.data;
-  const hashOk = hashMatches(view);
+  // Everything a member reads here comes from the fields that are hashed, under this
+  // console's own chain and the account in the address bar. The proposal's own calls,
+  // kind, decoded text and intent are the service's account of it; the intent is used
+  // only as a note beside a payment it agrees with.
+  const fields = signedFields(view);
+  const ctx = decodeContext(address);
+  const actions = decodeCalls(fields.calls, ctx);
+  const described = annotate(actions, view.intent);
+  const hashOk = hashMatches(view, address) && view.txHash.toLowerCase() === txHash.toLowerCase();
+  const unreadable = actions.filter((action) => action.type === "unreadable").length;
+  // An upgrade, a frozen implementation, a zero delay, an allowance: the changes that
+  // decide who holds the money afterwards. Radiant and WazirX were both one of these,
+  // signed in passing.
+  const risky = actions.some((action) => action.type === "allowance" || (action.type === "rule" && action.danger));
+  const lane = BigInt(fields.nonce) >> 64n;
+  const sequence = BigInt(fields.nonce) & ((1n << 64n) - 1n);
   const mySigner = walletSigner(acct, wallet.address);
   const myId = mySigner?.signerId.toLowerCase() ?? null;
   const confirmedBy = new Map(view.confirmations.map((confirmation) => [confirmation.signerId.toLowerCase(), confirmation]));
@@ -265,8 +327,13 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
   // itself proves which one did, so this needs no wallet match.
   const passkeyApprovers = approvers.filter((signer) => signer.kind === "webauthn" && !confirmedBy.has(signer.signerId.toLowerCase()));
   const signable = SIGNABLE.includes(view.status);
-  const canApprove = signable && hashOk && wallet.matches && Boolean(mySigner?.permissions.includes("approve")) && myId !== null && !confirmedBy.has(myId);
-  const canPasskey = signable && hashOk && passkeyApprovers.length > 0 && passkeySupported();
+  // Signing needs three things to hold: the hash is the hash of what is shown, the
+  // description does not contradict the calldata, and anything this console could not
+  // read has been looked at by the person about to sign it.
+  const truthful = signable && hashOk && !described.contradiction;
+  const readyToSign = truthful && ((unreadable === 0 && !risky) || acknowledged);
+  const canApprove = readyToSign && wallet.matches && Boolean(mySigner?.permissions.includes("approve")) && myId !== null && !confirmedBy.has(myId);
+  const canPasskey = readyToSign && passkeyApprovers.length > 0 && passkeySupported();
   const alreadyApproved = myId !== null && confirmedBy.has(myId);
   const canExecute = view.status === "ready" || (view.status === "failed" && view.approvals >= view.required);
   const canCancel = signable && view.confirmations.length > 0;
@@ -274,7 +341,6 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
   const canDelete = isProposer && ((view.status === "open" && view.confirmations.length === 0) || ["stale", "expired", "failed"].includes(view.status));
   const scheduledReady = view.status === "scheduled" && view.scheduledReadyAt != null && view.scheduledReadyAt <= now;
   const windowOpen = view.scheduledWindowEndsAt == null || view.scheduledWindowEndsAt > now;
-  const recipients = transferRecipients(view);
 
   async function run(action: Action, job: () => Promise<void>) {
     setError(null);
@@ -292,12 +358,12 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
     return run("approve", async () => {
       if (!mySigner || !wallet.address) return;
       await ensureChain();
-      const computed = proposalHash(view);
-      if (computed.toLowerCase() !== view.txHash.toLowerCase()) {
-        setError(`Hash mismatch, not signing. The typed data hashes to ${computed}; the proposal says ${view.txHash}.`);
+      const computed = proposalHash(view, address);
+      if (computed.toLowerCase() !== txHash.toLowerCase()) {
+        setError(`Hash mismatch, not signing. What is shown here hashes to ${computed}; the proposal says ${view.txHash}.`);
         return;
       }
-      const data = typedDataFor(view);
+      const data = typedDataFor(view, address);
       const signature = await signTypedDataAsync({ domain: data.domain, types: data.types, primaryType: data.primaryType, message: data.message });
       applyProposal(queryClient, address, await confirmProposal(address, txHash, { signerId: signerIdFor(wallet.address), signature }));
     });
@@ -305,12 +371,13 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
 
   function approveWithPasskey() {
     return run("passkey", async () => {
-      const computed = proposalHash(view);
-      if (computed.toLowerCase() !== view.txHash.toLowerCase()) {
-        setError(`Hash mismatch, not signing. The typed data hashes to ${computed}; the proposal says ${view.txHash}.`);
+      const computed = proposalHash(view, address);
+      if (computed.toLowerCase() !== txHash.toLowerCase()) {
+        setError(`Hash mismatch, not signing. What is shown here hashes to ${computed}; the proposal says ${view.txHash}.`);
         return;
       }
-      const signed = await signWithPasskey(view.txHash as `0x${string}`, passkeyApprovers.map((signer) => ({ signerId: signer.signerId, x: signer.x, y: signer.y })));
+      // The passkey is handed the hash computed here, never the one the proposal carries.
+      const signed = await signWithPasskey(computed, passkeyApprovers.map((signer) => ({ signerId: signer.signerId, x: signer.x, y: signer.y })));
       applyProposal(queryClient, address, await confirmProposal(address, txHash, signed));
     });
   }
@@ -334,16 +401,26 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
     <div className="olien-page">
       <div className="olien-tx-head">
         <div>
-          <span className="olien-panel-title">{kindLabel(view.kind)}</span>
+          <span className="olien-panel-title">{kindOf(actions)}</span>
           <h2 className="olien-tx-summary">{proposalSummary(view)}</h2>
           <p className="olien-muted">
-            Proposed by {proposerLabel(view.proposer)} on {formatTime(view.createdAt)}. Lane {view.nonceKey}, sequence {view.sequence}.
+            Proposed by {proposerLabel(view.proposer)} on {formatTime(view.createdAt)}. Lane {lane.toString()}, sequence {sequence.toString()}.
           </p>
         </div>
         <StatusPill status={view.status} />
       </div>
 
       <ResultBanner address={address} view={view} />
+      {!hashOk ? (
+        <Note tone="error" icon={<X size={15} />}>
+          What this page shows does not hash to this proposal&apos;s hash on this account and chain. Do not rely on anything below, and do not sign or veto on the strength of it.
+        </Note>
+      ) : null}
+      {described.contradiction ? (
+        <Note tone="error" icon={<X size={15} />}>
+          This proposal came with a description that does not match what it does: {described.contradiction}. What is shown below is read from the calldata itself. Approving is switched off; if the payment is wanted, propose it again.
+        </Note>
+      ) : null}
 
       <div className="olien-split">
         <div className="olien-col">
@@ -436,6 +513,16 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
               </div>
             ) : null}
 
+            {truthful && (unreadable > 0 || risky) ? (
+              <label className="olien-check olien-check--warn">
+                <input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} />
+                <span>
+                  {unreadable > 0
+                    ? `${unreadable === 1 ? "One call here cannot be read by this console." : `${unreadable} calls here cannot be read by this console.`} I have checked the raw calldata and know what ${unreadable === 1 ? "it does" : "they do"}.`
+                    : "This changes who or what controls the account's money. I have read it and checked every address in it against a source I trust."}
+                </span>
+              </label>
+            ) : null}
             {canApprove || canPasskey || alreadyApproved || canExecute || canCancel || canDelete ? (
               <div className="olien-action-row">
                 {canApprove ? (
@@ -483,46 +570,19 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
             ) : null}
             {signable && !wallet.matches ? <p className="olien-field-hint">Sign in with the connected wallet to approve.</p> : null}
             {signable && wallet.matches && !mySigner ? <p className="olien-field-hint">Your wallet {wallet.address ? shortAddress(wallet.address) : ""} is not a member of this Olien, so it cannot approve.</p> : null}
-            {!hashOk && signable ? <InlineError message="The typed data in this proposal does not hash to its txHash. Approving is disabled until the service fixes it." /> : null}
+            {!hashOk && signable ? <InlineError message="What this proposal asks you to sign does not hash to its own hash on this account and chain. Approving is switched off." /> : null}
             {canExecute ? <p className="olien-field-hint">Execute sends it through the relayer, which pays the gas and waits for the receipt.</p> : null}
             {canCancel ? <p className="olien-field-hint">Cancel creates a new transaction carrying cancel(hash); once it collects the same threshold it kills this one at once.</p> : null}
             <InlineError message={error} />
           </Panel>
 
           <Panel title="Transaction">
-            {recipients && recipients.length ? (
-              <ul className="olien-calls">
-                {recipients.map((recipient, index) => (
-                  <li key={`${recipient.to}-${index}`} className="olien-call">
-                    <span className="olien-call-index">{index + 1}</span>
-                    <div className="olien-call-body">
-                      <strong className="num">{formatUsdc(recipient.amount)}</strong>
-                      <span>
-                        to <AddressChip address={recipient.to} label={recipient.label} />
-                      </span>
-                      {recipient.memo ? <small className="olien-muted">Memo: {recipient.memo}</small> : null}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            ) : view.decoded.length ? (
-              <ul className="olien-calls">
-                {view.decoded.map((call, index) => (
-                  <li key={`${call.to}-${index}`} className="olien-call">
-                    <span className="olien-call-index">{index + 1}</span>
-                    <div className="olien-call-body">
-                      <strong>{call.summary}</strong>
-                      <span>
-                        <AddressChip address={call.to} label={call.label} /> <code className="olien-muted">{call.selector}</code>
-                        {call.readable ? null : <small className="olien-muted"> not decoded</small>}
-                      </span>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="olien-muted">The service could not decode these calls; check the raw calldata below.</p>
-            )}
+            <ul className="olien-calls">
+              {actions.map((action, index) => (
+                <ActionRow key={index} index={index} action={action} note={described.notes[index]} ctx={ctx} />
+              ))}
+            </ul>
+            <p className="olien-field-hint">Read by this console from the calldata being signed, not from the description the proposal came with.</p>
 
             {view.hardRules.length ? (
               <div className="olien-rules">
@@ -539,38 +599,38 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
               {view.simulation ? (
                 view.simulation.ok ? (
                   <>
-                    <Check size={14} /> Simulation passed, checked {formatTime(view.simulation.checkedAt)}.
+                    <Check size={14} /> The service ran these calls and they did not revert, checked {formatTime(view.simulation.checkedAt)}.
                   </>
                 ) : (
                   <>
-                    <X size={14} /> Simulation failed: {view.simulation.error ?? "the call reverts"}. Checked {formatTime(view.simulation.checkedAt)}.
+                    <X size={14} /> The service ran these calls and they revert: {view.simulation.error ?? "no reason given"}. Checked {formatTime(view.simulation.checkedAt)}.
                   </>
                 )
               ) : (
-                "Not simulated yet."
+                "The service has not run these calls yet."
               )}
             </div>
 
             <KeyValue
               items={[
-                { label: "Valid after", value: view.validAfter ? formatTime(view.validAfter) : "Immediately" },
-                { label: "Valid until", value: formatTime(view.validUntil) },
-                { label: "Lane", value: view.nonceKey },
-                { label: "Sequence", value: String(view.sequence) },
-                { label: "Nonce", value: view.nonce },
-                { label: "Epoch", value: String(view.epoch) },
+                { label: "Valid after", value: fields.validAfter ? formatTime(fields.validAfter) : "Immediately" },
+                { label: "Valid until", value: formatTime(fields.validUntil) },
+                { label: "Lane", value: lane.toString() },
+                { label: "Sequence", value: sequence.toString() },
+                { label: "Nonce", value: BigInt(fields.nonce).toString() },
+                { label: "Epoch", value: String(fields.epoch) },
                 { label: "Path", value: view.path },
               ]}
             />
 
             <Disclosure summary="Raw calldata">
               <div className="olien-raw">
-                {view.calls.map((call, index) => (
+                {fields.calls.map((call, index) => (
                   <div key={index} className="olien-raw-call">
                     <span>to</span>
                     <code>{call.to}</code>
                     <span>value</span>
-                    <code>{call.value}</code>
+                    <code>{String(call.value)}</code>
                     <span>data</span>
                     <code>{call.data}</code>
                   </div>

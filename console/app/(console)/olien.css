@@ -1721,6 +1721,28 @@ strong > .olien-tag {
   overflow-wrap: anywhere;
 }
 
+.olien-call.is-warn .olien-call-index {
+  border-color: rgba(245, 182, 66, 0.5);
+  color: var(--amber);
+}
+
+.olien-call-warn {
+  color: var(--amber);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.olien-check--warn {
+  align-items: flex-start;
+  color: var(--amber);
+  line-height: 1.45;
+}
+
+.olien-check--warn input {
+  margin-top: 2px;
+  flex: none;
+}
+
 .olien-rules {
   display: flex;
   flex-direction: column;

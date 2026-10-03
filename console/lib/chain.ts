@@ -10,6 +10,7 @@
 // testnet one called on chain (symbol USDC, version 2, six decimals).
 
 import { createPublicClient, defineChain, http, type Chain } from "viem";
+import type { DecodeContext, TokenInfo } from "./signing";
 
 export type ChainSlug = "arc-testnet" | "monad-testnet" | "monad";
 
@@ -21,6 +22,7 @@ interface ChainSpec {
   rpc: string;
   explorer: { name: string; url: string };
   usdc: `0x${string}`;
+  eurc?: `0x${string}`;
   testnet: boolean;
 }
 
@@ -33,6 +35,7 @@ const SPECS: Record<ChainSlug, ChainSpec> = {
     rpc: "https://arc-testnet.drpc.org",
     explorer: { name: "ArcScan", url: "https://testnet.arcscan.app" },
     usdc: "0x3600000000000000000000000000000000000000",
+    eurc: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
     testnet: true,
   },
   "monad-testnet": {
@@ -81,3 +84,13 @@ export const explorerName = chainSpec.explorer.name;
 export const olienUsdcAddress = chainSpec.usdc;
 export const explorerAddressUrl = (address: string) => `${chainSpec.explorer.url}/address/${address}`;
 export const explorerTxUrl = (hash: string) => `${chainSpec.explorer.url}/tx/${hash}`;
+
+// The tokens this console will read a transfer of. Fixed at build time on purpose: a
+// list the service supplied could name any contract USDC, and a payment to it would
+// then read as dollars.
+export const olienTokens: TokenInfo[] = [
+  { address: chainSpec.usdc, symbol: "USDC", decimals: 6 },
+  ...(chainSpec.eurc ? [{ address: chainSpec.eurc, symbol: "EURC", decimals: 6 }] : []),
+];
+
+export const decodeContext = (account: string): DecodeContext => ({ account, tokens: olienTokens, native: chainSpec.native });
