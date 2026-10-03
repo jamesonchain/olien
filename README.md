@@ -37,8 +37,81 @@ chains and hashed to confirm it: identical.
 | `service/` | The transaction service and the chain indexer |
 | `console/` | The web console, one deployment per chain |
 | `docs/` | The research and the design, including the account specification |
-| `deployments/` | One address book per chain, named by chain id |
-| `ops/` | Chain readiness checks and deploy scripts |
+| `deployments/` | One address book per chain, named by chain id, and `v1/creation.json`, the exact bytes v1 deploys from |
+| `ops/` | Chain readiness checks, the deploy script, a local chain, and a hash verifier that needs no console |
+
+## What changed, 30 September to 4 October 2026
+
+A lot landed in one push. If you were not there for it, this is what moved, what is live,
+and what now needs a decision. The long version, with the evidence for every point, is
+`docs/14-audit-vs-enterprise.md`.
+
+It started as an audit: Olien measured against what Fireblocks, BitGo, Safe and Squads
+do, and against the large multisig thefts of the last three years. Most of what follows
+is that audit's list being worked through. The two most serious items were not on the
+list at first. They were found by building, not by reading.
+
+### Live on olien.org now
+
+- **What you sign is read from the transaction itself.** The signing screen used to show
+  a payment's recipient and amount from the description stored beside a proposal, not
+  from its calldata. Anyone who could propose could show "250 USDC to Acme" over calldata
+  that paid someone else, and a passkey shows its holder nothing, so the screen was all
+  a member knew. The console now decodes the calls it is about to sign, builds every
+  hash itself, and uses the description only as a note when it agrees with the calls.
+  One that contradicts them switches approving off. This is `console/lib/signing.ts`.
+- **A call the console cannot read, an upgrade, or an allowance needs a tick** before
+  Approve appears.
+- **The browser runs a proposal's calls itself.** It says which call reverts and
+  whether the account can afford the batch, where it used to repeat the service's
+  verdict.
+- **Links work.** Every link to an account or a transaction pointed at `/olien/...`,
+  the path from before this was its own site, and had been a 404 since 17 September.
+- **The create wizard refuses an account that one lost key would lock forever.** The
+  screens also say what a zero delay, a fixed spending window and a synced passkey
+  really mean, and a new account lets any one member veto a rule change.
+
+### In the repository, not live yet
+
+The console on olien.org does not talk to `service/` in this repository. It talks to
+`olien-monad-testnet-production.up.railway.app`, which is built from a different
+repository, and the service here has never been deployed. So everything below is done
+and tested and reaches nobody until that changes.
+
+- The service refuses a proposal whose description contradicts its calls.
+- It refuses to start unless the contracts it is pointed at are Olien v1.
+- A signer can open an Olien by its address, and the service rebuilds it from the chain.
+- API keys expire, ninety days out unless you choose otherwise.
+- A `Dockerfile` at the root builds the service. The image has not been built yet.
+
+### Changed for anyone working here
+
+- **Never deploy the contracts with `forge script`.** Use `ops/deploy-olien.sh`. The
+  compiler ends creation code with a hash of the source paths, and this repository
+  moved them, so a build made here lands on different addresses from the ones Olien
+  holds on Arc and Monad. The script sends the original bytes from
+  `deployments/v1/creation.json`.
+- **Editing a contract now fails a test, on purpose.** `OlienCanonical.t.sol` holds the
+  source to what is deployed. A change that alters the account's code is a new version
+  with new addresses, not an edit, and that test is where it gets noticed.
+- **`ops/local-chain.sh`** starts a local chain with Olien on it and prints the command
+  to run the service against it. Everything service-side above was proved there.
+- **The console has tests.** `cd console && npm test`. Two of them read the source: one
+  for a link to the old path, one for any screen that signs something it did not build.
+- **`npm run lint` in the console does not run.** ESLint 9 wants a config file this
+  project does not have. It predates this week and is a good small thing to pick up.
+
+### What needs a person
+
+1. **Whether to move olien.org onto this repository's service.**
+   `docs/15-own-service.md` has what is ready, what it costs, and how to go back. It
+   starts from an empty database: accounts are reopened by address, and names, labels
+   and proposals still collecting signatures do not carry over.
+2. **The relayer is low on MON.** `0xD6c574461d96Ee708f58Fe553049aD4f48BB983A` pays for
+   executions on Monad testnet and is under the level the service calls low.
+3. **What is still open from the audit:** amount tiers and known destinations before a
+   payment runs, a signed address book, an audit trail with a rate limiter, and a second
+   RPC for the reads that decide whether a proposal is ready.
 
 ## Getting it
 
@@ -170,3 +243,6 @@ Two house rules, both about the same thing:
 - **Comments say why, not what.** If a comment restates the line below it, delete it.
 - **Commit messages explain the reasoning**, not the diff. The diff is already in the
   commit.
+
+Before you push, the three suites: `forge test` in `contracts/`, `cargo test` in
+`service/`, `npm test` in `console/`. None of them needs a network or a database.
