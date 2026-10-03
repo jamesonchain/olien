@@ -65,7 +65,7 @@ function ResultBanner({ address, view }: { address: string; view: ProposalView }
             "after its delay"
           )}
           . {view.effectiveVetoThreshold} {view.effectiveVetoThreshold === 1 ? "veto stops" : "vetoes stop"} it before then.{" "}
-          <Link href={`/olien/${address}/transactions`} className="olien-link">
+          <Link href={`/${address}/transactions`} className="olien-link">
             All scheduled changes
           </Link>
         </Note>
@@ -321,13 +321,13 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
     run("cancel", async () => {
       const next = await cancelProposal(address, txHash);
       applyProposal(queryClient, address, next);
-      router.push(`/olien/${address}/transactions/${next.txHash}`);
+      router.push(`/${address}/transactions/${next.txHash}`);
     });
   const remove = () =>
     run("delete", async () => {
       await deleteProposal(address, txHash);
       await queryClient.invalidateQueries({ queryKey: olienKeys.proposalsOf(address) });
-      router.push(`/olien/${address}/transactions`);
+      router.push(`/${address}/transactions`);
     });
 
   return (
@@ -380,7 +380,7 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
             {view.blockedBy ? (
               <p className="olien-field-hint">
                 Blocked behind{" "}
-                <Link href={`/olien/${address}/transactions/${view.blockedBy}`} className="olien-link">
+                <Link href={`/${address}/transactions/${view.blockedBy}`} className="olien-link">
                   {shortAddress(view.blockedBy)}
                 </Link>{" "}
                 in the same lane.

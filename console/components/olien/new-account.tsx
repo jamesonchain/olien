@@ -294,7 +294,7 @@ export function OlienNewAccount() {
       const view = await createAccount(payload);
       rememberAccount(view.address);
       await queryClient.invalidateQueries({ queryKey: olienKeys.accounts });
-      router.push(`/olien/${view.address}`);
+      router.push(`/${view.address}`);
     } catch (cause) {
       setError(errorMessage(cause));
       setCreating(false);

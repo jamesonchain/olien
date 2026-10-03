@@ -53,7 +53,7 @@ function useProposeSigners(address: string) {
     try {
       const view = await proposeSigners(address, body);
       applyProposal(queryClient, address, view);
-      router.push(`/olien/${address}/transactions/${view.txHash}`);
+      router.push(`/${address}/transactions/${view.txHash}`);
     } catch (cause) {
       setError(errorMessage(cause));
       setBusy(false);
@@ -256,7 +256,7 @@ export function OlienMembers({ address }: { address: string }) {
             {changes.map((row) => (
               <tr key={row.txHash}>
                 <td>
-                  <Link href={`/olien/${address}/transactions/${row.txHash}`} className="olien-row-title">
+                  <Link href={`/${address}/transactions/${row.txHash}`} className="olien-row-title">
                     {proposalSummary(row)}
                   </Link>
                 </td>
@@ -267,7 +267,7 @@ export function OlienMembers({ address }: { address: string }) {
                   {row.approvals}/{row.required}
                 </td>
                 <td className="olien-cell-end">
-                  <Link href={`/olien/${address}/transactions/${row.txHash}`} className="olien-link">
+                  <Link href={`/${address}/transactions/${row.txHash}`} className="olien-link">
                     Open
                   </Link>
                 </td>

@@ -62,7 +62,7 @@ function useRouteToProposal(address: string) {
   const queryClient = useQueryClient();
   return (view: ProposalView) => {
     applyProposal(queryClient, address, view);
-    router.push(`/olien/${address}/transactions/${view.txHash}`);
+    router.push(`/${address}/transactions/${view.txHash}`);
   };
 }
 
@@ -794,7 +794,7 @@ function LedgerSection({ address }: { address: string }) {
               <td className="olien-muted">
                 {entry.memo ? <span>{entry.memo} </span> : null}
                 {entry.proposalTxHash ? (
-                  <Link href={`/olien/${address}/transactions/${entry.proposalTxHash}`} className="olien-link">
+                  <Link href={`/${address}/transactions/${entry.proposalTxHash}`} className="olien-link">
                     {entry.memo ? "transaction" : "Transaction"}
                   </Link>
                 ) : entry.limitId != null ? (

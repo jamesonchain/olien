@@ -101,7 +101,7 @@ function AccountSwitcher({ address, name, view }: { address: string | null; name
             </div>
           ) : null}
           {others.map((row) => (
-            <Link key={row.address} role="menuitem" href={`/olien/${row.address}`} className="olien-menu-item" onClick={() => setOpen(false)}>
+            <Link key={row.address} role="menuitem" href={`/${row.address}`} className="olien-menu-item" onClick={() => setOpen(false)}>
               <span className="olien-switcher-avatar" aria-hidden>
                 {row.name.slice(0, 1).toUpperCase()}
               </span>
@@ -219,11 +219,11 @@ export function OlienShell({ children }: { children: ReactNode }) {
   const section = segments[1] ?? "";
   const nav = address
     ? [
-        { href: `/olien/${address}`, label: "Home", icon: <Home size={16} />, active: section === "" },
-        { href: `/olien/${address}/transactions`, label: "Transactions", icon: <ArrowLeftRight size={16} />, active: section === "transactions" },
-        { href: `/olien/${address}/members`, label: "Members", icon: <Users size={16} />, active: section === "members" },
-        { href: `/olien/${address}/payroll`, label: "Payroll", icon: <CalendarClock size={16} />, active: section === "payroll" },
-        { href: `/olien/${address}/settings`, label: "Settings", icon: <Settings size={16} />, active: section === "settings" },
+        { href: `/${address}`, label: "Home", icon: <Home size={16} />, active: section === "" },
+        { href: `/${address}/transactions`, label: "Transactions", icon: <ArrowLeftRight size={16} />, active: section === "transactions" },
+        { href: `/${address}/members`, label: "Members", icon: <Users size={16} />, active: section === "members" },
+        { href: `/${address}/payroll`, label: "Payroll", icon: <CalendarClock size={16} />, active: section === "payroll" },
+        { href: `/${address}/settings`, label: "Settings", icon: <Settings size={16} />, active: section === "settings" },
       ]
     : [];
 
@@ -279,7 +279,7 @@ export function OlienShell({ children }: { children: ReactNode }) {
             {address ? (
               <>
                 <Button onClick={() => setDepositOpen(true)}>Deposit</Button>
-                <Link href={`/olien/${address}/transactions/new`} className="olien-btn olien-btn--primary">
+                <Link href={`/${address}/transactions/new`} className="olien-btn olien-btn--primary">
                   <Send size={14} /> Send
                 </Link>
               </>

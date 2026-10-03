@@ -50,7 +50,7 @@ export function OlienSend({ address }: { address: string }) {
     try {
       const created = await proposeTransfer(address, { recipients: list, nonceKey: lane, validUntil: nowSeconds() + validDays * DAY });
       applyProposal(queryClient, address, created);
-      router.push(`/olien/${address}/transactions/${created.txHash}`);
+      router.push(`/${address}/transactions/${created.txHash}`);
     } catch (cause) {
       setError(errorMessage(cause));
       setSubmitting(false);

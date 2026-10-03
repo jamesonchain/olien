@@ -156,7 +156,7 @@ function PayrollRow({ address, run, onEdit }: { address: string; run: PayrollRun
       const created = await runPayroll(address, run.id);
       applyProposal(queryClient, address, created);
       await queryClient.invalidateQueries({ queryKey: olienKeys.payrolls(address) });
-      router.push(`/olien/${address}/transactions/${created.txHash}`);
+      router.push(`/${address}/transactions/${created.txHash}`);
     } catch (cause) {
       setError(errorMessage(cause));
       setBusy(null);
@@ -192,7 +192,7 @@ function PayrollRow({ address, run, onEdit }: { address: string; run: PayrollRun
       <td className="olien-muted">
         {run.lastRunAt ? (
           run.lastRunTxHash ? (
-            <Link href={`/olien/${address}/transactions/${run.lastRunTxHash}`} className="olien-link">
+            <Link href={`/${address}/transactions/${run.lastRunTxHash}`} className="olien-link">
               {formatTime(run.lastRunAt)}
             </Link>
           ) : (
@@ -340,7 +340,7 @@ function ChequeRow({ address, account, cheque }: { address: string; account: Acc
           </div>
         ) : cheque.status === "voiding" && cheque.voidProposalTxHash ? (
           <div className="olien-muted">
-            <Link href={`/olien/${address}/transactions/${cheque.voidProposalTxHash}`} className="olien-link">
+            <Link href={`/${address}/transactions/${cheque.voidProposalTxHash}`} className="olien-link">
               Cancellation
             </Link>
           </div>

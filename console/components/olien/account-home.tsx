@@ -68,7 +68,7 @@ function BalanceCard({ view, entries, approvers, onDeposit }: { view: AccountVie
         ) : null}
       </div>
       <div className="olien-dash-actions">
-        <Link href={`/olien/${view.address}/transactions/new`} className="olien-dash-action">
+        <Link href={`/${view.address}/transactions/new`} className="olien-dash-action">
           <ArrowUp size={15} /> Send
         </Link>
         <button type="button" className="olien-dash-action" onClick={onDeposit}>
@@ -244,7 +244,7 @@ function AccountsCard({ view }: { view: AccountView }) {
     <section className="olien-dash-card olien-dash-accounts">
       <div className="olien-dash-card-head">
         <h2>Accounts</h2>
-        <Link href={`/olien/${view.address}/settings`} className="olien-icon-btn" aria-label="Manage accounts">
+        <Link href={`/${view.address}/settings`} className="olien-icon-btn" aria-label="Manage accounts">
           <ChevronRight size={16} />
         </Link>
       </div>
@@ -266,7 +266,7 @@ function AccountsCard({ view }: { view: AccountView }) {
       {view.subAccounts.length === 0 ? (
         <p className="olien-dash-hint">
           Sub-accounts split one treasury into Operations, Payroll and the like, each with its own address.{" "}
-          <Link href={`/olien/${view.address}/settings`} className="olien-link">
+          <Link href={`/${view.address}/settings`} className="olien-link">
             Add one in Settings
           </Link>
         </p>

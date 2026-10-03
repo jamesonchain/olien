@@ -31,7 +31,7 @@ export function TransactionsTable({
   return (
     <Table head={["Transaction", "Status", "Approvals", "Created", "Proposer"]} className="olien-table--transactions">
       {rows.map((row) => {
-        const href = `/olien/${address}/transactions/${row.txHash}`;
+        const href = `/${address}/transactions/${row.txHash}`;
         return (
           <tr key={row.txHash} className="olien-row--link" onClick={() => router.push(href)}>
             <td>

@@ -31,7 +31,7 @@ export function OlienStart() {
       {!accounts.isLoading ? (
         <div className="olien-cards">
           {rows.map((row) => (
-            <Link key={row.address} href={`/olien/${row.address}`} className="olien-card olien-card--account">
+            <Link key={row.address} href={`/${row.address}`} className="olien-card olien-card--account">
               <div className="olien-card-head">
                 <span className="olien-switcher-avatar" aria-hidden>
                   {row.name.slice(0, 1).toUpperCase()}
