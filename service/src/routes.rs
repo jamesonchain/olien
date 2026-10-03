@@ -3,9 +3,14 @@
 
 use actix_web::{web, HttpRequest, HttpResponse};
 use serde::Deserialize;
+use serde_json::json;
 use sqlx::PgPool;
+use std::time::Instant;
 
+use crate::audit;
 use crate::auth::{account_error_response, bearer_token, error_response};
+use crate::limit::{self, Limiter};
+use crate::policy::Policy;
 use crate::sessions as account_sessions;
 use crate::payroll::{self, PayrollBody};
 use crate::webhooks::{self, WebhookBody};
@@ -28,21 +33,54 @@ async fn caller(pool: &PgPool, req: &HttpRequest, need: Need, address: Option<&s
         Ok(token) => token,
         Err((status, message)) => return Err(error_response(status, &message)),
     };
+    let limiter = req.app_data::<web::Data<Limiter>>();
+    let now = Instant::now();
     if treasury_keys::looks_like_key(token) {
+        // Keys that turn out not to exist are counted against the address they came
+        // from, and that count is looked at before the key is, so guessing is slow
+        // whatever is guessed.
+        let guesser = format!("wrong-key:{}", caller_address(req));
+        if limiter.is_some_and(|limiter| limiter.exhausted(&guesser, limit::WRONG_KEY, now)) {
+            return Err(too_many(10));
+        }
         let grant = match treasury_keys::resolve(pool, token).await {
             Ok(Some(grant)) => grant,
-            Ok(None) => return Err(error_response(401, "this API key is not valid")),
+            Ok(None) => {
+                if let Some(limiter) = limiter {
+                    let _ = limiter.take(&guesser, limit::WRONG_KEY, now);
+                }
+                return Err(error_response(401, "this API key is not valid"));
+            }
             Err(error) => return Err(failed(error)),
         };
+        if let Some(Err(wait)) = limiter.map(|limiter| limiter.take(&format!("key:{}", grant.key_id), limit::KEY, now)) {
+            return Err(too_many(wait));
+        }
         if let Err((status, message)) = treasury_keys::permit(&grant, need, address) {
             return Err(error_response(status, message));
         }
         return Ok(Caller { user: grant.user, key: Some(grant.key_id) });
     }
+    // By the token, before it is looked up, so a loop costs the database nothing.
+    let session = format!("session:{}", token.get(..16).unwrap_or(token));
+    if let Some(Err(wait)) = limiter.map(|limiter| limiter.take(&session, limit::SESSION, now)) {
+        return Err(too_many(wait));
+    }
     account_sessions::account_for_access_token(pool, token)
         .await
         .map(|profile| Caller { user: profile.account_id, key: None })
         .map_err(|error| account_error_response("reading account session", error))
+}
+
+/// Where a request came from, as the proxy in front of the service reports it.
+pub(crate) fn caller_address(req: &HttpRequest) -> String {
+    req.connection_info().realip_remote_addr().unwrap_or("unknown").to_string()
+}
+
+pub(crate) fn too_many(wait_seconds: u64) -> HttpResponse {
+    HttpResponse::TooManyRequests()
+        .insert_header(("retry-after", wait_seconds.to_string()))
+        .json(json!({ "error": "too many requests; try again shortly" }))
 }
 
 fn failed(error: TreasuryError) -> HttpResponse {
@@ -379,12 +417,61 @@ pub async fn address_book(pool: web::Data<PgPool>, req: HttpRequest, path: web::
 
 pub async fn add_address(
     pool: web::Data<PgPool>,
+    service: web::Data<Treasury>,
     req: HttpRequest,
     path: web::Path<String>,
     body: web::Json<treasury::AddressBookBody>,
 ) -> HttpResponse {
     let user = who!(pool, req);
-    reply(treasury::add_address(pool.get_ref(), user, &path, body.into_inner()).await)
+    reply(treasury::add_address(pool.get_ref(), service.get_ref(), user, &path, body.into_inner()).await)
+}
+
+pub async fn remove_address(pool: web::Data<PgPool>, req: HttpRequest, path: web::Path<(String, String)>) -> HttpResponse {
+    let user = who!(pool, req);
+    let (address, entry) = path.into_inner();
+    match treasury::remove_address(pool.get_ref(), user, &address, &entry).await {
+        Ok(()) => HttpResponse::NoContent().finish(),
+        Err(error) => failed(error),
+    }
+}
+
+pub async fn get_policy(pool: web::Data<PgPool>, req: HttpRequest, path: web::Path<String>) -> HttpResponse {
+    let user = who_on!(pool, req, Need::Read, &path).user;
+    reply(treasury::get_policy(pool.get_ref(), user, &path).await)
+}
+
+/// PUT /api/treasury/accounts/{address}/policy - applied at once if it only tightens,
+/// otherwise left waiting the account's config delay.
+pub async fn set_policy(pool: web::Data<PgPool>, req: HttpRequest, path: web::Path<String>, body: web::Json<Policy>) -> HttpResponse {
+    let user = who!(pool, req);
+    reply(treasury::set_policy(pool.get_ref(), user, &path, body.into_inner()).await)
+}
+
+pub async fn cancel_policy_change(pool: web::Data<PgPool>, req: HttpRequest, path: web::Path<String>) -> HttpResponse {
+    let user = who!(pool, req);
+    reply(treasury::cancel_policy_change(pool.get_ref(), user, &path).await)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditQuery {
+    pub before: Option<i64>,
+    pub limit: Option<i64>,
+    pub format: Option<String>,
+}
+
+/// GET /api/treasury/accounts/{address}/audit - who did what, newest first, as JSON or
+/// with ?format=csv as a file. A read key may fetch it: this is what an auditor's
+/// tooling is for.
+pub async fn audit_trail(pool: web::Data<PgPool>, req: HttpRequest, path: web::Path<String>, query: web::Query<AuditQuery>) -> HttpResponse {
+    let user = who_on!(pool, req, Need::Read, &path).user;
+    match audit::page(pool.get_ref(), user, &path, query.before, query.limit.unwrap_or(200)).await {
+        Ok(page) if query.format.as_deref() == Some("csv") => HttpResponse::Ok()
+            .content_type("text/csv; charset=utf-8")
+            .insert_header(("x-olien-audit-intact", page.intact.to_string()))
+            .body(audit::csv(&page)),
+        Ok(page) => HttpResponse::Ok().json(page),
+        Err(error) => failed(error),
+    }
 }
 
 #[derive(Deserialize)]
@@ -579,6 +666,11 @@ pub fn routes(scope: actix_web::Scope) -> actix_web::Scope {
         .route("/accounts/{address}/ledger", web::get().to(ledger))
         .route("/accounts/{address}/address-book", web::get().to(address_book))
         .route("/accounts/{address}/address-book", web::post().to(add_address))
+        .route("/accounts/{address}/address-book/{entry}", web::delete().to(remove_address))
+        .route("/accounts/{address}/policy", web::get().to(get_policy))
+        .route("/accounts/{address}/policy", web::put().to(set_policy))
+        .route("/accounts/{address}/policy/pending", web::delete().to(cancel_policy_change))
+        .route("/accounts/{address}/audit", web::get().to(audit_trail))
         .route("/accounts/{address}/api-keys", web::get().to(list_keys))
         .route("/accounts/{address}/api-keys", web::post().to(mint_key))
         .route("/accounts/{address}/api-keys/{id}", web::delete().to(revoke_key))

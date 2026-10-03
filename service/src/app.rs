@@ -11,6 +11,7 @@ use serde_json::json;
 use sqlx::PgPool;
 
 use crate::config::Config;
+use crate::limit::Limiter;
 use crate::treasury::Treasury;
 use crate::{auth, routes};
 
@@ -25,6 +26,7 @@ pub async fn health(config: web::Data<Config>, treasury: web::Data<Treasury>) ->
         "chainId": config.chain_id,
         "chain": config.chain_name,
         "relayer": relayer,
+        "secondRpc": treasury.client.as_ref().is_some_and(|client| client.has_witness()),
     }))
 }
 
@@ -50,6 +52,7 @@ pub fn build_app(
     pool: PgPool,
     config: Config,
     treasury: Treasury,
+    limiter: web::Data<Limiter>,
 ) -> App<
     // The body type is left open because the CORS middleware wraps it in an Either to
     // answer preflights itself, so naming BoxBody here would not match what is built.
@@ -64,6 +67,7 @@ pub fn build_app(
     App::new()
         .wrap(cors(&config))
         .app_data(web::Data::new(pool))
+        .app_data(limiter)
         .app_data(web::Data::new(config))
         .app_data(web::Data::new(treasury))
         .route("/health", web::get().to(health))

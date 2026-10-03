@@ -191,6 +191,7 @@ pub async fn create(pool: &PgPool, user: i64, address: &str, body: WebhookBody) 
     .bind(user)
     .fetch_one(pool)
     .await?;
+    crate::audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "webhook.created", Some(&row.id.to_string()), serde_json::json!({ "url": url })).await;
     Ok(CreatedWebhook { secret, view: view_of(pool, row).await? })
 }
 
@@ -200,6 +201,7 @@ pub async fn delete(pool: &PgPool, user: i64, address: &str, id: i64) -> Res<()>
     if done.rows_affected() == 0 {
         return Err(TreasuryError::NotFound("no such webhook".into()));
     }
+    crate::audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "webhook.deleted", Some(&id.to_string()), serde_json::json!({})).await;
     Ok(())
 }
 

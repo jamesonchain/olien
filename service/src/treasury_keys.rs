@@ -14,6 +14,7 @@ use rand::RngCore;
 use serde::Serialize;
 use sqlx::PgPool;
 
+use crate::audit;
 use crate::treasury::{bad, context_for, parse_address, Res, TreasuryError};
 
 /// What the key starts with. A session token is base64url and never contains an
@@ -210,6 +211,7 @@ pub async fn mint_key(pool: &PgPool, user: i64, address: &str, name: &str, scope
     .bind(days)
     .fetch_one(pool)
     .await?;
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "key.minted", Some(&row.id.to_string()), serde_json::json!({ "name": name, "scope": scope.as_str(), "days": days })).await;
     Ok(MintedKey { key, view: view_of(pool, row).await? })
 }
 
@@ -224,6 +226,7 @@ pub async fn revoke_key(pool: &PgPool, user: i64, address: &str, id: i64) -> Res
     if done.rows_affected() == 0 {
         return Err(TreasuryError::NotFound("no such key".into()));
     }
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "key.revoked", Some(&id.to_string()), serde_json::json!({})).await;
     Ok(())
 }
 

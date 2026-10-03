@@ -433,6 +433,25 @@ pub fn message_hash(chain_id: u64, account: Address, hash: B256) -> B256 {
     typed(domain_separator(chain_id, account), struct_hash)
 }
 
+/// What a member signs to put an address in the book: the address, what it is called,
+/// and when. It is a struct of its own in the account's domain, which the account never
+/// verifies, so the signature is worth nothing on the chain and cannot be replayed as an
+/// approval of anything. The time is inside the signature so that nobody holding the
+/// database can make an entry look older than it is.
+pub fn address_book_hash(chain_id: u64, account: Address, entry: Address, label: &str, category: &str, added_at: u64) -> B256 {
+    let struct_hash = keccak256(
+        (
+            typehash("AddressBookEntry(address entry,string label,string category,uint48 addedAt)"),
+            entry,
+            keccak256(label.as_bytes()),
+            keccak256(category.as_bytes()),
+            U256::from(added_at),
+        )
+            .abi_encode(),
+    );
+    typed(domain_separator(chain_id, account), struct_hash)
+}
+
 fn typed(domain: B256, struct_hash: B256) -> B256 {
     let mut out = Vec::with_capacity(66);
     out.extend_from_slice(&[0x19, 0x01]);
@@ -666,9 +685,34 @@ pub struct Sent {
     pub gas_used: u64,
 }
 
+/// What decides whether a proposal may run: the account's epoch and threshold, who its
+/// signers are, and where each lane stands.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Gate {
+    pub epoch: u64,
+    pub threshold: u16,
+    pub signers: Vec<B256>,
+    pub sequences: Vec<u64>,
+}
+
+async fn gate_from(provider: &DynProvider, account: Address, lanes: &[U256]) -> Result<Gate> {
+    let contract = IOlien::new(account, provider);
+    let config = contract.getConfig().call().await.map_err(describe)?;
+    let mut signers = contract.getSigners().call().await.map_err(describe)?;
+    signers.sort();
+    let mut sequences = Vec::with_capacity(lanes.len());
+    for lane in lanes {
+        let nonce = contract.getNonce(alloy::primitives::Uint::<192, 3>::from(*lane)).call().await.map_err(describe)?;
+        sequences.push((nonce & U256::from(u64::MAX)).to::<u64>());
+    }
+    Ok(Gate { epoch: config.epoch, threshold: config.threshold, signers, sequences })
+}
+
 #[derive(Clone)]
 pub struct OlienClient {
     provider: DynProvider,
+    /// A second endpoint, read only, that the first is checked against.
+    witness: Option<DynProvider>,
     relayer: Address,
     pub deployment: OlienDeployment,
     pub usdc: Address,
@@ -687,7 +731,12 @@ impl OlienClient {
         deployment: OlienDeployment,
         usdc: Address,
         eurc: Option<Address>,
+        witness_url: Option<&str>,
     ) -> Result<Self> {
+        let witness = match witness_url {
+            Some(url) => Some(ProviderBuilder::new().connect_http(url.parse().context("parsing RPC_URL_SECONDARY")?).erased()),
+            None => None,
+        };
         let signer: PrivateKeySigner = private_key.trim().parse().context("parsing the relayer key")?;
         let relayer = signer.address();
         let url = rpc_url.parse().context("parsing the RPC URL for the relayer")?;
@@ -704,6 +753,7 @@ impl OlienClient {
             .erased();
         Ok(Self {
             provider,
+            witness,
             relayer,
             deployment,
             usdc,
@@ -714,6 +764,50 @@ impl OlienClient {
 
     pub fn relayer(&self) -> Address {
         self.relayer
+    }
+
+    pub fn has_witness(&self) -> bool {
+        self.witness.is_some()
+    }
+
+    /// Whether the two endpoints tell different stories about what gates execution,
+    /// and what the difference is. None when they agree, and when there is only one.
+    ///
+    /// An RPC provider can lie about an epoch, a nonce or a signer set, and a service
+    /// that reads one endpoint believes it. Two endpoints run by different people have
+    /// to both lie, the same way. They can also simply be a block apart, so a first
+    /// difference is asked about again after a moment before it counts. A witness that
+    /// cannot be reached says nothing either way and is not a disagreement.
+    pub async fn disagreement(&self, account: Address, lanes: &[U256]) -> Result<Option<String>> {
+        let Some(witness) = &self.witness else { return Ok(None) };
+        for attempt in 0..2 {
+            let ours = gate_from(&self.provider, account, lanes).await?;
+            let theirs = match gate_from(witness, account, lanes).await {
+                Ok(gate) => gate,
+                Err(error) => {
+                    tracing::warn!("the second RPC could not be read for {account:#x}: {error:#}");
+                    return Ok(None);
+                }
+            };
+            if ours == theirs {
+                return Ok(None);
+            }
+            if attempt == 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+            let what = if ours.epoch != theirs.epoch {
+                format!("the epoch ({} and {})", ours.epoch, theirs.epoch)
+            } else if ours.threshold != theirs.threshold {
+                format!("the threshold ({} and {})", ours.threshold, theirs.threshold)
+            } else if ours.signers != theirs.signers {
+                "who the signers are".to_string()
+            } else {
+                "where a lane stands".to_string()
+            };
+            return Ok(Some(what));
+        }
+        Ok(None)
     }
 
     pub async fn predict_address(&self, init: &Init, salt: B256) -> Result<Address> {
@@ -1208,6 +1302,18 @@ mod tests {
         let account = address!("12808a601475b87ce7b343A18f11062cc74Eae81");
         let hash = message_hash(5_042_002, account, B256::repeat_byte(0x11));
         assert_eq!(format!("{hash:#x}"), "0x752e2d6bbdfbb51bb7255ac18e5bac6b5ac1fbc662cd3db5b86c1eee9fd703f4");
+    }
+
+    // Computed independently by viem's hashTypedData, which is what a wallet and the
+    // console use: if the two ever differ, every entry a member signs is refused here.
+    #[test]
+    fn an_address_book_entry_hashes_as_a_wallet_hashes_it() {
+        let account = address!("00000000000000000000000000000000000000AB");
+        let entry = address!("3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+        let hash = address_book_hash(10143, account, entry, "Acme Ltd", "Supplier", 1_791_201_600);
+        assert_eq!(format!("{hash:#x}"), "0xbba321448f5927f73078c7d1ffa63d1b3c3612d586cf19665eeb2fca7c7c1cb3");
+        assert_ne!(address_book_hash(10143, account, entry, "Acme Ltd", "Supplier", 1_791_201_601), hash, "the time is part of what is signed");
+        assert_ne!(address_book_hash(10143, account, entry, "Acme Inc", "Supplier", 1_791_201_600), hash, "and so is the label");
     }
 
     // The proof account's device key and the id `getSigners()` lists for it.

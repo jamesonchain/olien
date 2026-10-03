@@ -16,8 +16,11 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::olien::{self, calldata, Call, OlienClient};
+use crate::audit;
+use crate::policy::SoftRule;
 use crate::treasury::{
-    self, bad, check_signature, context_for, parse_address, parse_amount, AccountContext, ConfirmationJson, Res, SignerRow, Treasury, TreasuryError,
+    self, bad, check_signature, context_for, parse_address, parse_amount, AccountContext, AccountRow, ConfirmationJson, Res, SignerRow, SoftContext, Treasury,
+    TreasuryError,
 };
 use crate::treasury_keys::member_name;
 
@@ -86,6 +89,8 @@ pub struct ChequeView {
     pub status: String,
     pub signatures: Vec<ConfirmationJson>,
     pub required: i64,
+    /// The treasury's policy still holding an open cheque back from being issued.
+    pub soft_rules: Vec<SoftRule>,
     pub void_proposal_tx_hash: Option<String>,
     pub proposer: Option<String>,
     pub created_at: i64,
@@ -158,6 +163,10 @@ async fn view_of(pool: &PgPool, treasury: &Treasury, ctx: &AccountContext, row: 
         None => None,
     };
     let book = treasury::address_book_map(pool, ctx.row.id).await?;
+    let (soft_rules, required) = match row.status.as_str() {
+        "open" => held(pool, &ctx.row, &ctx.signers, &row).await?,
+        _ => (Vec::new(), ctx.row.threshold as i64),
+    };
     Ok(ChequeView {
         id: row.id,
         to_label: book.get(&row.to_address).cloned(),
@@ -172,7 +181,8 @@ async fn view_of(pool: &PgPool, treasury: &Treasury, ctx: &AccountContext, row: 
         memo: row.memo,
         status: row.status,
         signatures,
-        required: ctx.row.threshold as i64,
+        required,
+        soft_rules,
         void_proposal_tx_hash: row.void_tx_hash,
         proposer,
         created_at: row.created_at.timestamp(),
@@ -251,6 +261,7 @@ pub async fn write(pool: &PgPool, treasury: &Treasury, user: i64, address: &str,
     .bind(user)
     .fetch_one(pool)
     .await?;
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "cheque.written", Some(&id.to_string()), json!({ "to": format!("{to:#x}"), "amount": amount.to_string() })).await;
     let row = load(pool, ctx.row.id, id).await?;
     view_of(pool, treasury, &ctx, row).await
 }
@@ -288,9 +299,27 @@ pub async fn sign(pool: &PgPool, treasury: &Treasury, user: i64, address: &str, 
     .bind(&signature)
     .execute(pool)
     .await?;
-    issue_if_ready(pool, &ctx, &row).await?;
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "cheque.signed", Some(&id.to_string()), json!({ "signerId": signer_id })).await;
+    issue_if_ready(pool, &ctx.row, &ctx.signers, &row).await?;
     let row = load(pool, ctx.row.id, id).await?;
     view_of(pool, treasury, &ctx, row).await
+}
+
+/// The signatures on a cheque that count: from signers who are active and may approve.
+async fn counted(pool: &PgPool, signers: &[SignerRow], cheque_id: i64) -> Res<Vec<(String, Vec<u8>)>> {
+    let signed: Vec<(String, Vec<u8>)> =
+        sqlx::query_as("SELECT signer_id, signature FROM olien_cheque_signatures WHERE cheque_id = $1").bind(cheque_id).fetch_all(pool).await?;
+    Ok(signed.into_iter().filter(|(id, _)| signers.iter().any(|s| &s.signer_id == id && s.status == "active" && s.approves())).collect())
+}
+
+/// What the treasury's policy still has against issuing this cheque, and the approvals
+/// it needs. A cheque is a payment by another route, so it answers to the same rules as
+/// a proposal: its amount to the tiers, its recipient to the address book, the moment
+/// to the hours.
+async fn held(pool: &PgPool, account: &AccountRow, signers: &[SignerRow], row: &Row) -> Res<(Vec<SoftRule>, i64)> {
+    let approvals = counted(pool, signers, row.id).await?.len() as i64;
+    let payment = (parse_address(&row.to_address)?, parse_amount(&row.amount)?);
+    Ok(SoftContext::load(pool, account, signers).await?.rules_for(&[payment], &[], approvals, treasury::now()))
 }
 
 /// Enough approvers have signed: pack the set the way the account verifies it and
@@ -303,23 +332,41 @@ pub async fn sign(pool: &PgPool, treasury: &Treasury, user: i64, address: &str, 
 /// `GET /api/treasury/cheques/issued` says the same thing with the dependency pointing
 /// the other way, so an app that wants an inbox reads this service rather than the
 /// service writing into the app.
-async fn issue_if_ready(pool: &PgPool, ctx: &AccountContext, row: &Row) -> Res<()> {
-    let signed: Vec<(String, Vec<u8>)> =
-        sqlx::query_as("SELECT signer_id, signature FROM olien_cheque_signatures WHERE cheque_id = $1").bind(row.id).fetch_all(pool).await?;
-    let counted: Vec<&(String, Vec<u8>)> = signed
-        .iter()
-        .filter(|(id, _)| ctx.signers.iter().any(|s| &s.signer_id == id && s.status == "active" && s.approves()))
-        .collect();
-    if (counted.len() as i64) < ctx.row.threshold as i64 {
+async fn issue_if_ready(pool: &PgPool, account: &AccountRow, signers: &[SignerRow], row: &Row) -> Res<()> {
+    let counted = counted(pool, signers, row.id).await?;
+    if (counted.len() as i64) < account.threshold as i64 {
+        return Ok(());
+    }
+    // Enough for the account is not always enough for the treasury. A held cheque
+    // stays open, and the indexer tries again each cycle, since two of the things that
+    // hold one, the hours and a new destination's wait, pass by themselves.
+    if !held(pool, account, signers, row).await?.0.is_empty() {
         return Ok(());
     }
     let entries: Vec<(B256, Vec<u8>)> = counted.iter().map(|(id, sig)| Ok((treasury::parse_hash(id)?, sig.clone()))).collect::<Res<_>>()?;
     let packed = olien::pack(&entries)?;
-    sqlx::query("UPDATE olien_cheques SET status = 'issued', signature = $2, issued_at = now(), updated_at = now() WHERE id = $1 AND status = 'open'")
+    let done = sqlx::query("UPDATE olien_cheques SET status = 'issued', signature = $2, issued_at = now(), updated_at = now() WHERE id = $1 AND status = 'open'")
         .bind(row.id)
         .bind(hex(&packed))
         .execute(pool)
         .await?;
+    if done.rows_affected() == 1 {
+        audit::record(pool, account.id, &account.address, None, None, "cheque.issued", Some(&row.id.to_string()), json!({ "to": row.to_address, "amount": row.amount })).await;
+    }
+    Ok(())
+}
+
+/// Called by the indexer: open cheques with enough signatures that the policy was
+/// holding are issued once it lets go.
+pub async fn issue_waiting(pool: &PgPool, account: &AccountRow) -> Res<()> {
+    let rows: Vec<Row> = sqlx::query_as(&format!("{SELECT} WHERE c.olien_id = $1 AND c.status = 'open'")).bind(account.id).fetch_all(pool).await?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let signers = treasury::signers_of(pool, account.id).await?;
+    for row in &rows {
+        issue_if_ready(pool, account, &signers, row).await?;
+    }
     Ok(())
 }
 
@@ -399,6 +446,7 @@ pub async fn void(pool: &PgPool, treasury: &Treasury, user: i64, address: &str, 
         "open" => {
             // Nothing has left the building; the draft simply goes.
             sqlx::query("DELETE FROM olien_cheques WHERE id = $1").bind(id).execute(pool).await?;
+            audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "cheque.deleted", Some(&id.to_string()), json!({})).await;
             return Err(TreasuryError::NotFound("the draft cheque was deleted".into()));
         }
         "issued" => {}
@@ -414,6 +462,7 @@ pub async fn void(pool: &PgPool, treasury: &Treasury, user: i64, address: &str, 
     .bind(&view.tx_hash)
     .execute(pool)
     .await?;
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "cheque.voiding", Some(&id.to_string()), json!({ "proposal": view.tx_hash })).await;
     let row = load(pool, ctx.row.id, id).await?;
     view_of(pool, treasury, &ctx, row).await
 }

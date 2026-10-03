@@ -16,8 +16,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::audit;
 use crate::canonical;
 use crate::members::Members;
+use crate::policy::{self, Policy, SoftRule};
 use crate::olien::{
     self, address_of_signer_id, calldata, signer_id_of_address, signer_id_of_key, Call, IOlien, Init, OlienClient, PackedUserOperation,
     SignerInput, SpendingLimitInput, Transaction, FLAG_UV_REQUIRED, KIND_CONTRACT, KIND_ECDSA, KIND_P256, KIND_WEBAUTHN,
@@ -74,7 +76,7 @@ pub struct ChainInfo {
     pub features: &'static [&'static str],
 }
 
-pub const FEATURES: &[&str] = &["import", "key-expiry", "synced"];
+pub const FEATURES: &[&str] = &["import", "key-expiry", "synced", "signed-book", "policy", "audit"];
 
 #[derive(Debug)]
 pub enum TreasuryError {
@@ -471,6 +473,9 @@ pub struct ProposalView {
     pub missing: Vec<MissingJson>,
     pub blocked_by: Option<i64>,
     pub hard_rules: Vec<HardRule>,
+    /// The treasury's own policy still holding this back. Never the chain's rules: a
+    /// member with the threshold's signatures can run it without this service.
+    pub soft_rules: Vec<SoftRule>,
     pub simulation: Option<Simulation>,
     pub scheduled_ready_at: Option<i64>,
     pub scheduled_window_ends_at: Option<i64>,
@@ -514,6 +519,13 @@ pub struct AddressBookEntry {
     pub label: String,
     pub category: String,
     pub created_at: i64,
+    /// The member who vouched for it, their signature over the address, the label, the
+    /// category and `added_at`, and that time. A client checks the signature itself
+    /// before it shows the label or treats the address as known. Absent on a row from
+    /// before entries were signed, which counts for nothing.
+    pub signer_id: Option<String>,
+    pub signature: Option<String>,
+    pub added_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -695,10 +707,14 @@ pub struct ConfirmationBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AddressBookBody {
     pub address: String,
     pub label: String,
     pub category: Option<String>,
+    pub signer_id: Option<String>,
+    pub signature: Option<String>,
+    pub added_at: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,6 +1101,7 @@ pub async fn create_account(pool: &PgPool, treasury: &Treasury, user: i64, body:
 
     let row = load_account_by_id(pool, id).await?;
     refresh_account_from_chain(pool, client, &row).await?;
+    audit::record(pool, row.id, &row.address, Some(user), None, "account.created", None, json!({ "name": row.name, "threshold": body.threshold, "signers": body.signers.len() })).await;
     account_view(pool, treasury, user, &row.address).await
 }
 
@@ -1179,6 +1196,7 @@ pub async fn import_account(pool: &PgPool, treasury: &Treasury, user: i64, body:
     .await?;
     let row = load_account(pool, &addr(account)).await?;
     refresh_account_from_chain(pool, client, &row).await?;
+    audit::record(pool, row.id, &row.address, Some(user), None, "account.imported", None, json!({ "name": row.name, "fromBlock": block })).await;
     account_view(pool, treasury, user, &row.address).await
 }
 
@@ -1745,6 +1763,7 @@ async fn insert_proposal(
         return Err(TreasuryError::Conflict("this exact transaction is already proposed".into()));
     }
     refresh_statuses(pool, &ctx.row).await?;
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), via_key, "proposal.opened", Some(&hash_text), json!({ "kind": kind, "calls": calls.len() })).await;
     let view = proposal_view(pool, chain_id, user, &ctx.row, &hash_text).await?;
     // The other members learn about this through a webhook on the proposals topic,
     // which reads olien_proposals.updated_at and so covers every proposal rather than
@@ -1949,6 +1968,85 @@ async fn confirmations_of(pool: &PgPool, proposal_id: i64) -> Res<Vec<Confirmati
     .await?)
 }
 
+/// The entries a current approver has signed, each with the time inside its signature.
+/// An entry vouched for by someone who is no longer a signer is nobody's word any more.
+async fn known_destinations(pool: &PgPool, olien_id: i64) -> Res<HashMap<Address, u64>> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT b.address, b.added_at FROM olien_address_book b
+         JOIN olien_signers s ON s.olien_id = b.olien_id AND s.signer_id = b.signer_id
+         WHERE b.olien_id = $1 AND b.signature IS NOT NULL AND b.added_at IS NOT NULL AND s.status = 'active' AND s.permissions & 1 <> 0",
+    )
+    .bind(olien_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().filter_map(|(address, at)| Some((address.parse().ok()?, at.max(0) as u64))).collect())
+}
+
+/// The account's own addresses: itself and its sub-accounts. Moving money between them
+/// is not paying anyone.
+async fn own_addresses(pool: &PgPool, account: &AccountRow) -> Res<HashSet<Address>> {
+    let subs: Vec<(String,)> = sqlx::query_as("SELECT address FROM olien_sub_accounts WHERE olien_id = $1").bind(account.id).fetch_all(pool).await?;
+    Ok(subs.into_iter().filter_map(|(address,)| address.parse().ok()).chain(std::iter::once(account.address())).collect())
+}
+
+/// What the treasury's policy needs to know about an account, read once and held
+/// against as many proposals as a request touches.
+pub(crate) struct SoftContext {
+    policy: Policy,
+    known: HashMap<Address, u64>,
+    internal: HashSet<Address>,
+    approvers: i64,
+    threshold: i64,
+    account: Address,
+    disputed: bool,
+}
+
+impl SoftContext {
+    pub(crate) async fn load(pool: &PgPool, account: &AccountRow, signers: &[SignerRow]) -> Res<SoftContext> {
+        let policy = policy_of(pool, account).await?;
+        let (known, internal) = match policy.require_known_destination {
+            true => (known_destinations(pool, account.id).await?, own_addresses(pool, account).await?),
+            false => (HashMap::new(), HashSet::new()),
+        };
+        Ok(SoftContext {
+            policy,
+            known,
+            internal,
+            approvers: signers.iter().filter(|s| s.status == "active" && s.approves()).count() as i64,
+            threshold: account.threshold as i64,
+            account: account.address(),
+            disputed: is_disputed(account.id),
+        })
+    }
+
+    /// The rules holding these calls back, and the approvals they need.
+    pub(crate) fn rules(&self, calls: &[Call], approvals: i64, now: u64) -> (Vec<SoftRule>, i64) {
+        let tokens = chain_tokens();
+        let mut payments = Vec::new();
+        let mut unreadable = Vec::new();
+        for call in calls.iter().filter(|call| call.to != self.account) {
+            match payment_of(call, &tokens) {
+                Some(payment) => payments.push(payment),
+                None => unreadable.push(call.to),
+            }
+        }
+        self.rules_for(&payments, &unreadable, approvals, now)
+    }
+
+    pub(crate) fn rules_for(&self, payments: &[(Address, U256)], unreadable: &[Address], approvals: i64, now: u64) -> (Vec<SoftRule>, i64) {
+        let facts = policy::Facts { payments, unreadable, approvals, approvers: self.approvers, threshold: self.threshold, now, known: &self.known, internal: &self.internal };
+        let mut rules = policy::evaluate(&self.policy, &facts);
+        if self.disputed {
+            rules.push(SoftRule {
+                rule: "rpc",
+                text: "The service's two views of the chain disagree about this account. Nothing is marked ready until they agree.".into(),
+                until: None,
+            });
+        }
+        (rules, policy::required_approvals(&self.policy, &facts))
+    }
+}
+
 /// Approvals that count: distinct confirmations from active signers holding APPROVE.
 fn count_approvals(confirmations: &[ConfirmationRow], signers: &[SignerRow]) -> i64 {
     confirmations
@@ -1968,6 +2066,10 @@ pub async fn refresh_statuses(pool: &PgPool, account: &AccountRow) -> Res<()> {
     .fetch_all(pool)
     .await?;
     let ts = now() as i64;
+    let soft = match open.is_empty() {
+        true => None,
+        false => Some(SoftContext::load(pool, account, &signers).await?),
+    };
     for p in &open {
         let next = match p.status.as_str() {
             _ if p.epoch != account.epoch => "stale",
@@ -1978,7 +2080,15 @@ pub async fn refresh_statuses(pool: &PgPool, account: &AccountRow) -> Res<()> {
                     "replaced"
                 } else {
                     let confirmations = confirmations_of(pool, p.id).await?;
-                    if count_approvals(&confirmations, &signers) >= account.threshold as i64 {
+                    let approvals = count_approvals(&confirmations, &signers);
+                    // The chain's floor first, then the treasury's own rules: enough
+                    // signatures for the account is not always enough for the policy,
+                    // and a proposal it holds stays open until it lets go.
+                    let held = match &soft {
+                        Some(soft) if approvals >= account.threshold as i64 => !soft.rules(&calls_from_json(&p.calls)?, approvals, ts as u64).0.is_empty(),
+                        _ => false,
+                    };
+                    if approvals >= account.threshold as i64 && !held {
                         if p.sequence == chain_sequence { "ready" } else { "blocked" }
                     } else {
                         "open"
@@ -2002,17 +2112,25 @@ pub(crate) async fn proposal_view(pool: &PgPool, chain_id: u64, user: i64, accou
     let signers = signers_of(pool, account.id).await?;
     let linked = linked_set(pool, user).await?;
     let book = address_book_map(pool, account.id).await?;
-    build_view(pool, chain_id, account, &row, &signers, &linked, &book).await
+    let soft = SoftContext::load(pool, account, &signers).await?;
+    build_view(pool, chain_id, account, &row, &signers, &linked, &book, &soft).await
 }
 
+/// Labels for the addresses a current approver has signed into the book. An unsigned
+/// row, or one whose signer has left, labels nothing.
 pub(crate) async fn address_book_map(pool: &PgPool, olien_id: i64) -> Res<HashMap<String, String>> {
-    let rows: Vec<(String, String)> = sqlx::query_as("SELECT address, label FROM olien_address_book WHERE olien_id = $1")
-        .bind(olien_id)
-        .fetch_all(pool)
-        .await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT b.address, b.label FROM olien_address_book b
+         JOIN olien_signers s ON s.olien_id = b.olien_id AND s.signer_id = b.signer_id
+         WHERE b.olien_id = $1 AND b.signature IS NOT NULL AND s.status = 'active' AND s.permissions & 1 <> 0",
+    )
+    .bind(olien_id)
+    .fetch_all(pool)
+    .await?;
     Ok(rows.into_iter().collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_view(
     pool: &PgPool,
     chain_id: u64,
@@ -2021,6 +2139,7 @@ async fn build_view(
     signers: &[SignerRow],
     linked: &HashSet<String>,
     book: &HashMap<String, String>,
+    soft: &SoftContext,
 ) -> Res<ProposalView> {
     let account_address = account.address();
     let calls = calls_from_json(&row.calls)?;
@@ -2033,6 +2152,11 @@ async fn build_view(
     let label_of = |id: &str| signers.iter().find(|s| s.signer_id == id).map(|s| s.label.clone()).unwrap_or_default();
     let is_mine = |id: &str| signers.iter().any(|s| s.signer_id == id && s.address.as_ref().is_some_and(|a| linked.contains(a)));
     let approvals = count_approvals(&confirmations, signers);
+    // Only a proposal still in play is held to the policy; one that has run is history.
+    let (soft_rules, required) = match row.status.as_str() {
+        "open" | "ready" | "blocked" | "failed" => soft.rules(&calls, approvals, now()),
+        _ => (Vec::new(), account.threshold as i64),
+    };
     let missing: Vec<MissingJson> = signers
         .iter()
         .filter(|s| s.status == "active" && s.approves() && !confirmations.iter().any(|c| c.signer_id == s.signer_id))
@@ -2123,11 +2247,12 @@ async fn build_view(
                 signed_at: c.signed_at.timestamp(),
             })
             .collect(),
-        required: account.threshold,
+        required: required as i32,
         approvals,
         missing,
         blocked_by,
         hard_rules,
+        soft_rules,
         simulation: row.simulation_ok.map(|ok| Simulation { ok, error: row.simulation_error.clone(), checked_at: row.simulated_at.unwrap_or(0) }),
         scheduled_ready_at: row.scheduled_ready_at,
         scheduled_window_ends_at: row.scheduled_window_ends,
@@ -2150,14 +2275,32 @@ async fn build_view(
 // set once at boot. One process serves one chain, which is what makes a process-wide
 // value honest here. Before this it was Arc's address alone, so on Monad a payment
 // decoded as a raw call and a ledger row named its token "token".
-static CHAIN_USDC: std::sync::OnceLock<Address> = std::sync::OnceLock::new();
+static CHAIN_TOKENS: std::sync::OnceLock<Vec<Address>> = std::sync::OnceLock::new();
 
-pub fn set_chain_usdc(usdc: Address) {
-    let _ = CHAIN_USDC.set(usdc);
+pub fn set_chain_tokens(usdc: Address, eurc: Option<Address>) {
+    let _ = CHAIN_TOKENS.set(std::iter::once(usdc).chain(eurc).collect());
+}
+
+/// The tokens a treasury on this chain holds, dollars first.
+fn chain_tokens() -> Vec<Address> {
+    CHAIN_TOKENS.get().cloned().unwrap_or_else(|| vec!["0x3600000000000000000000000000000000000000".parse().unwrap_or(Address::ZERO)])
 }
 
 fn book_usdc() -> Address {
-    CHAIN_USDC.get().copied().unwrap_or_else(|| "0x3600000000000000000000000000000000000000".parse().unwrap_or(Address::ZERO))
+    chain_tokens().first().copied().unwrap_or(Address::ZERO)
+}
+
+// The accounts the two RPCs last told different stories about. Kept in the process and
+// not in the database because it is a statement about right now: a restart asks again.
+static DISPUTED: std::sync::OnceLock<Mutex<HashSet<i64>>> = std::sync::OnceLock::new();
+
+pub fn mark_disputed(olien_id: i64, disputed: bool) {
+    let mut set = DISPUTED.get_or_init(Default::default).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if disputed { set.insert(olien_id) } else { set.remove(&olien_id) };
+}
+
+fn is_disputed(olien_id: i64) -> bool {
+    DISPUTED.get().is_some_and(|set| set.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(&olien_id))
 }
 
 /// The ledger stores the token that moved, so a row can name itself. Anything we do
@@ -2204,9 +2347,10 @@ pub async fn list_proposals(pool: &PgPool, treasury: &Treasury, user: i64, addre
     };
     let linked = linked_set(pool, user).await?;
     let book = address_book_map(pool, ctx.row.id).await?;
+    let soft = SoftContext::load(pool, &ctx.row, &ctx.signers).await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        out.push(build_view(pool, treasury.chain_id, &ctx.row, row, &ctx.signers, &linked, &book).await?);
+        out.push(build_view(pool, treasury.chain_id, &ctx.row, row, &ctx.signers, &linked, &book, &soft).await?);
     }
     Ok(out)
 }
@@ -2228,6 +2372,7 @@ pub async fn delete_proposal(pool: &PgPool, user: i64, address: &str, tx_hash: &
         return Err(TreasuryError::Conflict("a proposal with confirmations is cancelled on chain, not deleted".into()));
     }
     sqlx::query("DELETE FROM olien_proposals WHERE id = $1").bind(row.id).execute(pool).await?;
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "proposal.deleted", Some(&row.tx_hash), json!({ "kind": row.kind })).await;
     Ok(())
 }
 
@@ -2271,6 +2416,7 @@ pub async fn confirm(pool: &PgPool, treasury: &Treasury, user: i64, address: &st
     .bind(kind)
     .execute(pool)
     .await?;
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "proposal.approved", Some(&row.tx_hash), json!({ "signerId": signer_id, "how": kind })).await;
     refresh_statuses(pool, &ctx.row).await?;
     proposal_view(pool, treasury.chain_id, user, &ctx.row, tx_hash).await
 }
@@ -2322,6 +2468,7 @@ pub async fn rename_account(pool: &PgPool, treasury: &Treasury, user: i64, addre
         return Err(bad("name must be 1 to 80 characters"));
     }
     sqlx::query("UPDATE olien_accounts SET name = $2 WHERE id = $1").bind(ctx.row.id).bind(name).execute(pool).await?;
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "account.renamed", None, json!({ "from": ctx.row.name, "to": name })).await;
     account_view(pool, treasury, user, address).await
 }
 
@@ -2389,11 +2536,26 @@ pub async fn execute(pool: &PgPool, treasury: &Treasury, user: i64, address: &st
     let row = load_proposal(pool, ctx.row.id, tx_hash).await?;
     let confirmations = confirmations_of(pool, row.id).await?;
     let approvals = count_approvals(&confirmations, &ctx.signers);
+    let account = ctx.row.address();
+    let calls = calls_from_json(&row.calls)?;
+    // The policy is asked here, at the moment of sending, and before the queue's state
+    // is: a retry of a failed proposal skips those states, hours and a new
+    // destination's wait are about now, and a proposal the policy is holding is "open",
+    // which by itself would tell the member nothing about why.
+    if approvals >= ctx.row.threshold as i64 && matches!(row.status.as_str(), "open" | "ready" | "failed") {
+        let (held, _) = SoftContext::load(pool, &ctx.row, &ctx.signers).await?.rules(&calls, approvals, now());
+        if let Some(rule) = held.first() {
+            return Err(TreasuryError::Conflict(format!("held by treasury policy: {}", rule.text)));
+        }
+    }
     if !(row.status == "ready" || (row.status == "failed" && approvals >= ctx.row.threshold as i64)) {
         return Err(TreasuryError::Conflict(format!("the proposal is {}, not ready", row.status)));
     }
-    let account = ctx.row.address();
-    let calls = calls_from_json(&row.calls)?;
+    let lane = U256::from_str_radix(&row.nonce_key, 10).unwrap_or(U256::ZERO);
+    if let Some(what) = client.disagreement(account, &[lane]).await.map_err(|e| TreasuryError::Chain(format!("{e:#}")))? {
+        mark_disputed(ctx.row.id, true);
+        return Err(TreasuryError::Conflict(format!("the service's two views of the chain disagree about {what}; nothing is sent until they agree")));
+    }
     let mut entries: Vec<(B256, Vec<u8>)> = Vec::new();
     for c in &confirmations {
         let signer = ctx.signers.iter().find(|s| s.signer_id == c.signer_id && s.status == "active");
@@ -2442,6 +2604,7 @@ pub async fn execute(pool: &PgPool, treasury: &Treasury, user: i64, address: &st
                     .await?;
             }
             mark_replaced(pool, ctx.row.id, &row.nonce_key, row.sequence, row.id).await?;
+            audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "proposal.executed", Some(&row.tx_hash), json!({ "tx": hex(sent.tx_hash.as_slice()), "scheduled": scheduled })).await;
             if let Err(e) = refresh_account_from_chain(pool, client, &ctx.row).await {
                 tracing::warn!("refresh after execute failed: {e:#}");
             }
@@ -2456,6 +2619,7 @@ pub async fn execute(pool: &PgPool, treasury: &Treasury, user: i64, address: &st
                 .bind(&text)
                 .execute(pool)
                 .await?;
+            audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "proposal.failed", Some(&row.tx_hash), json!({ "error": text })).await;
             Err(TreasuryError::Chain(format!("execute failed: {text}")))
         }
     }
@@ -2835,37 +2999,268 @@ pub(crate) async fn ledger_entries(pool: &PgPool, olien_id: i64, before: Option<
 
 pub async fn address_book(pool: &PgPool, user: i64, address: &str) -> Res<Vec<AddressBookEntry>> {
     let ctx = context_for(pool, user, address).await?;
-    let rows: Vec<(String, String, String, DateTime<Utc>)> =
-        sqlx::query_as("SELECT address, label, category, created_at FROM olien_address_book WHERE olien_id = $1 ORDER BY label")
-            .bind(ctx.row.id)
-            .fetch_all(pool)
-            .await?;
+    let rows: Vec<(String, String, String, DateTime<Utc>, Option<String>, Option<Vec<u8>>, Option<i64>)> = sqlx::query_as(
+        "SELECT address, label, category, created_at, signer_id, signature, added_at FROM olien_address_book WHERE olien_id = $1 ORDER BY label",
+    )
+    .bind(ctx.row.id)
+    .fetch_all(pool)
+    .await?;
     Ok(rows
         .into_iter()
-        .map(|(address, label, category, at)| AddressBookEntry { address, label, category, created_at: at.timestamp() })
+        .map(|(address, label, category, at, signer_id, signature, added_at)| AddressBookEntry {
+            address,
+            label,
+            category,
+            created_at: at.timestamp(),
+            signer_id,
+            signature: signature.map(|bytes| hex(&bytes)),
+            added_at,
+        })
         .collect())
 }
 
-pub async fn add_address(pool: &PgPool, user: i64, address: &str, body: AddressBookBody) -> Res<AddressBookEntry> {
+/// How far the time inside an entry's signature may be from this service's clock. The
+/// time is what a new destination's wait is counted from, so a member must not be able
+/// to sign one that is already old.
+const ENTRY_CLOCK_SKEW: u64 = 600;
+
+/// Adds an address to the book, or signs one that is there.
+///
+/// An entry is what makes an address known, and the policy pays known addresses, so it
+/// has to be something this service cannot write by itself. The member signs the
+/// address, the label, the category and the time, in the account's own domain; the
+/// signature is checked here as a confirmation is, kept beside the row, and handed to
+/// every client, which checks it again before believing the label.
+pub async fn add_address(pool: &PgPool, treasury: &Treasury, user: i64, address: &str, body: AddressBookBody) -> Res<AddressBookEntry> {
+    let client = treasury.client.as_ref().ok_or(TreasuryError::Off)?;
     let ctx = context_for(pool, user, address).await?;
     let entry = parse_address(&body.address)?;
     let label = body.label.trim().to_string();
-    if label.is_empty() || label.len() > 80 {
+    if label.is_empty() || label.chars().count() > 80 {
         return Err(bad("label must be 1 to 80 characters"));
     }
-    let category = body.category.unwrap_or_default();
+    let category = body.category.as_deref().map(str::trim).unwrap_or("").to_string();
+    if category.chars().count() > 40 {
+        return Err(bad("a category is at most 40 characters"));
+    }
+    let (Some(signer_id), Some(signature), Some(added_at)) = (body.signer_id.as_deref(), body.signature.as_deref(), body.added_at) else {
+        return Err(bad("an address book entry is signed by a member: send signerId, signature and addedAt"));
+    };
+    if added_at.abs_diff(now()) > ENTRY_CLOCK_SKEW {
+        return Err(bad("the time signed into the entry is not now; sign it again"));
+    }
+    let signer_id = hex(parse_hash(signer_id)?.as_slice());
+    let signer = ctx.signers.iter().find(|s| s.signer_id == signer_id && s.status == "active").ok_or_else(|| bad("not a signer of this account"))?;
+    if !signer.approves() {
+        return Err(bad("only a member who can approve payments can vouch for a destination"));
+    }
+    let signature = parse_hex_bytes(signature)?;
+    let hash = olien::address_book_hash(treasury.chain_id, ctx.row.address(), entry, &label, &category, added_at);
+    check_signature(client, &ctx, signer, hash, &signature).await?;
     sqlx::query(
-        "INSERT INTO olien_address_book (olien_id, address, label, category, added_by) VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (olien_id, address) DO UPDATE SET label = EXCLUDED.label, category = EXCLUDED.category",
+        "INSERT INTO olien_address_book (olien_id, address, label, category, added_by, signer_id, signature, added_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (olien_id, address) DO UPDATE SET label = EXCLUDED.label, category = EXCLUDED.category, added_by = EXCLUDED.added_by,
+            signer_id = EXCLUDED.signer_id, signature = EXCLUDED.signature, added_at = EXCLUDED.added_at",
     )
     .bind(ctx.row.id)
     .bind(addr(entry))
     .bind(&label)
     .bind(&category)
     .bind(user)
+    .bind(&signer_id)
+    .bind(&signature)
+    .bind(added_at as i64)
     .execute(pool)
     .await?;
-    Ok(AddressBookEntry { address: addr(entry), label, category, created_at: now() as i64 })
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "book.added", Some(&addr(entry)), json!({ "label": label, "category": category, "signerId": signer_id })).await;
+    // A destination that just became known can let a waiting payment through later.
+    refresh_statuses(pool, &ctx.row).await?;
+    Ok(AddressBookEntry { address: addr(entry), label, category, created_at: now() as i64, signer_id: Some(signer_id), signature: Some(hex(&signature)), added_at: Some(added_at as i64) })
+}
+
+/// Takes an address out of the book. Any member may, at once: when a destination
+/// nobody recognises appears, removing it is how one person stops the payment to it.
+pub async fn remove_address(pool: &PgPool, user: i64, address: &str, entry: &str) -> Res<()> {
+    let ctx = context_for(pool, user, address).await?;
+    let entry = parse_address(entry)?;
+    let done = sqlx::query("DELETE FROM olien_address_book WHERE olien_id = $1 AND address = $2").bind(ctx.row.id).bind(addr(entry)).execute(pool).await?;
+    if done.rows_affected() == 0 {
+        return Err(TreasuryError::NotFound("no such address in the book".into()));
+    }
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "book.removed", Some(&addr(entry)), json!({})).await;
+    refresh_statuses(pool, &ctx.row).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The treasury's policy (policy.rs has the rules; this is where they are kept)
+
+#[derive(sqlx::FromRow)]
+struct PolicyRow {
+    policy: Value,
+    pending: Option<Value>,
+    pending_effective_at: Option<i64>,
+    pending_by: Option<i64>,
+}
+
+// A stored policy that cannot be read is an error and not an empty policy: dropping a
+// treasury's rules because a row is damaged would be the service loosening them itself.
+fn parse_policy(value: &Value) -> Res<Policy> {
+    serde_json::from_value(value.clone()).map_err(|e| TreasuryError::Internal(anyhow!("the stored treasury policy cannot be read: {e}")))
+}
+
+/// The policy row, with a waiting change applied if its time has come. Nothing runs on
+/// a timer for this: whoever next asks finds the change due and it takes effect then,
+/// which is the same moment as far as anyone can tell.
+async fn policy_row(pool: &PgPool, account: &AccountRow) -> Res<Option<PolicyRow>> {
+    let row: Option<PolicyRow> = sqlx::query_as("SELECT policy, pending, pending_effective_at, pending_by FROM olien_policies WHERE olien_id = $1")
+        .bind(account.id)
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else { return Ok(None) };
+    if let (Some(pending), Some(at)) = (row.pending.clone(), row.pending_effective_at) {
+        if at <= now() as i64 {
+            let done = sqlx::query(
+                "UPDATE olien_policies SET policy = pending, pending = NULL, pending_effective_at = NULL, pending_by = NULL, updated_at = now()
+                 WHERE olien_id = $1 AND pending_effective_at = $2",
+            )
+            .bind(account.id)
+            .bind(at)
+            .execute(pool)
+            .await?;
+            // Only the reader whose update landed records it, so it is recorded once.
+            if done.rows_affected() == 1 {
+                audit::record(pool, account.id, &account.address, row.pending_by, None, "policy.applied", None, pending.clone()).await;
+            }
+            return Ok(Some(PolicyRow { policy: pending, pending: None, pending_effective_at: None, pending_by: None }));
+        }
+    }
+    Ok(Some(row))
+}
+
+pub(crate) async fn policy_of(pool: &PgPool, account: &AccountRow) -> Res<Policy> {
+    match policy_row(pool, account).await? {
+        Some(row) => parse_policy(&row.policy),
+        None => Ok(Policy::default()),
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPolicy {
+    pub policy: Policy,
+    pub effective_at: i64,
+    pub proposed_by: Option<String>,
+    /// What it lets through that the current policy holds, which is why it waits.
+    pub loosens: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyView {
+    pub policy: Policy,
+    pub pending: Option<PendingPolicy>,
+    /// How long a change that loosens the policy waits: the account's own config delay.
+    pub change_delay: i64,
+}
+
+async fn policy_view(pool: &PgPool, account: &AccountRow) -> Res<PolicyView> {
+    let row = policy_row(pool, account).await?;
+    let current = match &row {
+        Some(row) => parse_policy(&row.policy)?,
+        None => Policy::default(),
+    };
+    let pending = match row {
+        Some(PolicyRow { pending: Some(pending), pending_effective_at: Some(at), pending_by, .. }) => {
+            let proposed = parse_policy(&pending)?;
+            let proposed_by = match pending_by {
+                Some(id) => Some(crate::treasury_keys::member_name(pool, id).await?),
+                None => None,
+            };
+            Some(PendingPolicy { loosens: policy::loosens(&current, &proposed), policy: proposed, effective_at: at, proposed_by })
+        }
+        _ => None,
+    };
+    Ok(PolicyView { policy: current, pending, change_delay: account.config_delay })
+}
+
+pub async fn get_policy(pool: &PgPool, user: i64, address: &str) -> Res<PolicyView> {
+    let ctx = context_for(pool, user, address).await?;
+    policy_view(pool, &ctx.row).await
+}
+
+/// Changes the treasury's policy the way the account changes its own rules: a change
+/// that only tightens takes effect at once, and one that loosens anything waits the
+/// account's config delay, during which any member can cancel it. A policy that one
+/// member could switch off in the moment before a payment would be no policy.
+pub async fn set_policy(pool: &PgPool, user: i64, address: &str, body: Policy) -> Res<PolicyView> {
+    let ctx = context_for(pool, user, address).await?;
+    require_live(&ctx.row)?;
+    if ctx.membership.signer_ids.is_empty() {
+        return Err(bad("only a signer of this account changes its policy"));
+    }
+    let wanted = body.checked().map_err(bad)?;
+    let row = policy_row(pool, &ctx.row).await?;
+    let current = match &row {
+        Some(row) => parse_policy(&row.policy)?,
+        None => Policy::default(),
+    };
+    if wanted == current {
+        return policy_view(pool, &ctx.row).await;
+    }
+    let loosened = policy::loosens(&current, &wanted);
+    let stored = serde_json::to_value(&wanted).map_err(|e| TreasuryError::Internal(e.into()))?;
+    if loosened.is_empty() || ctx.row.config_delay == 0 {
+        // Applying a change now also drops one that was waiting: the waiting change was
+        // written against the old policy and would undo this one when it landed.
+        sqlx::query(
+            "INSERT INTO olien_policies (olien_id, policy) VALUES ($1, $2)
+             ON CONFLICT (olien_id) DO UPDATE SET policy = EXCLUDED.policy, pending = NULL, pending_effective_at = NULL, pending_by = NULL, updated_at = now()",
+        )
+        .bind(ctx.row.id)
+        .bind(&stored)
+        .execute(pool)
+        .await?;
+        audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "policy.changed", None, json!({ "policy": stored, "loosens": loosened })).await;
+    } else {
+        if row.as_ref().is_some_and(|row| row.pending.is_some()) {
+            return Err(TreasuryError::Conflict("a change to the policy is already waiting; cancel it before proposing another".into()));
+        }
+        let effective_at = now() as i64 + ctx.row.config_delay;
+        sqlx::query(
+            "INSERT INTO olien_policies (olien_id, policy, pending, pending_effective_at, pending_by) VALUES ($1, '{}'::jsonb, $2, $3, $4)
+             ON CONFLICT (olien_id) DO UPDATE SET pending = EXCLUDED.pending, pending_effective_at = EXCLUDED.pending_effective_at,
+                pending_by = EXCLUDED.pending_by, updated_at = now()",
+        )
+        .bind(ctx.row.id)
+        .bind(&stored)
+        .bind(effective_at)
+        .bind(user)
+        .execute(pool)
+        .await?;
+        audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "policy.proposed", None, json!({ "policy": stored, "loosens": loosened, "effectiveAt": effective_at })).await;
+    }
+    refresh_statuses(pool, &ctx.row).await?;
+    policy_view(pool, &ctx.row).await
+}
+
+/// Any member stops a waiting change. It never took effect, so nothing is undone.
+pub async fn cancel_policy_change(pool: &PgPool, user: i64, address: &str) -> Res<PolicyView> {
+    let ctx = context_for(pool, user, address).await?;
+    let done = sqlx::query(
+        "UPDATE olien_policies SET pending = NULL, pending_effective_at = NULL, pending_by = NULL, updated_at = now()
+         WHERE olien_id = $1 AND pending IS NOT NULL AND pending_effective_at > $2",
+    )
+    .bind(ctx.row.id)
+    .bind(now() as i64)
+    .execute(pool)
+    .await?;
+    if done.rows_affected() == 0 {
+        return Err(TreasuryError::NotFound("no change to the policy is waiting".into()));
+    }
+    audit::record(pool, ctx.row.id, &ctx.row.address, Some(user), None, "policy.cancelled", None, json!({})).await;
+    policy_view(pool, &ctx.row).await
 }
 
 #[cfg(test)]

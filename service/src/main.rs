@@ -7,13 +7,16 @@
 // database loses convenience and never authority.
 
 mod app;
+mod audit;
 mod auth;
 mod canonical;
 mod config;
 mod indexer;
+mod limit;
 mod members;
 mod olien;
 mod payroll;
+mod policy;
 mod routes;
 mod sessions;
 mod treasury;
@@ -57,7 +60,7 @@ async fn main() -> Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("migrations applied");
 
-    treasury::set_chain_usdc(config.usdc);
+    treasury::set_chain_tokens(config.usdc, config.eurc);
     let treasury = build_treasury(&config)?;
     if let Some(client) = treasury.client.clone() {
         hold_to_v1(client).await?;
@@ -88,7 +91,9 @@ async fn main() -> Result<()> {
     // accepts IPv4, so nothing public changes.
     let bind = ("::", config.port);
     let port = config.port;
-    HttpServer::new(move || app::build_app(pool.clone(), config.clone(), treasury.clone()))
+    // One limiter for the whole process: built per worker it would be ten allowances.
+    let limiter = actix_web::web::Data::new(limit::Limiter::default());
+    HttpServer::new(move || app::build_app(pool.clone(), config.clone(), treasury.clone(), limiter.clone()))
         .bind(bind)
         .map_err(|e| anyhow::anyhow!("binding :{port}: {e}"))?
         .run()
@@ -152,7 +157,12 @@ fn build_treasury(config: &Config) -> Result<Treasury> {
                 deployment.clone(),
                 config.usdc,
                 config.eurc,
+                config.rpc_url_secondary.as_deref(),
             )?;
+            match client.has_witness() {
+                true => tracing::info!("a second RPC is set: what gates execution is read from both and must agree"),
+                false => tracing::warn!("no RPC_URL_SECONDARY: what gates execution is read from one endpoint and believed"),
+            }
             tracing::info!(
                 "relayer {:#x} (factory {:#x}, implementation {:#x}, verifier {:#x}, sub-accounts {:#x})",
                 client.relayer(),

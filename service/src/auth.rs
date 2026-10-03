@@ -9,6 +9,8 @@ use serde_json::json;
 use sqlx::PgPool;
 use std::str::FromStr;
 
+use crate::limit::{self, Limiter};
+use crate::routes::{caller_address, too_many};
 use crate::sessions;
 
 #[derive(Deserialize)]
@@ -33,8 +35,14 @@ pub struct RefreshRequest {
 /// Public: the nonce is single-use and worthless without the signature.
 pub async fn wallet_challenge(
     pool: web::Data<PgPool>,
+    limiter: web::Data<Limiter>,
+    req: HttpRequest,
     body: web::Json<WalletChallengeRequest>,
 ) -> HttpResponse {
+    // Every challenge is a row, so an unlimited caller can fill a table.
+    if let Err(wait) = limiter.take(&format!("sign-in:{}", caller_address(&req)), limit::SIGN_IN, std::time::Instant::now()) {
+        return too_many(wait);
+    }
     let Ok(address) = Address::from_str(body.address.trim()) else {
         return error_response(400, "malformed address");
     };
@@ -56,8 +64,13 @@ pub async fn wallet_challenge(
 /// a session whose identity is the address.
 pub async fn wallet_login(
     pool: web::Data<PgPool>,
+    limiter: web::Data<Limiter>,
+    req: HttpRequest,
     body: web::Json<WalletLoginRequest>,
 ) -> HttpResponse {
+    if let Err(wait) = limiter.take(&format!("sign-in:{}", caller_address(&req)), limit::SIGN_IN, std::time::Instant::now()) {
+        return too_many(wait);
+    }
     match sessions::login_wallet(pool.get_ref(), &body.address, &body.nonce, &body.signature).await {
         Ok(grant) => HttpResponse::Ok().json(grant),
         Err(error) => account_error_response("wallet login", error),

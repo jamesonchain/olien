@@ -45,6 +45,9 @@ pub struct NativeToken {
 pub struct Config {
     pub database_url: String,
     pub rpc_url: String,
+    /// A second, independent endpoint for the same chain. When set, what decides
+    /// whether a proposal may run is read from both, and they must agree.
+    pub rpc_url_secondary: Option<String>,
     pub port: u16,
     pub index_interval_secs: u64,
     /// The widest block range one log query may ask for on this chain.
@@ -179,6 +182,7 @@ impl Config {
                 "postgres://olien:olien@localhost:5433/olien",
             ),
             rpc_url: rpc_url_for(deployment.chain_id),
+            rpc_url_secondary: optional_env("RPC_URL_SECONDARY"),
             port: env_or("PORT", "8080").parse().context("PORT")?,
             index_interval_secs: env_or("INDEX_INTERVAL_SECS", "15")
                 .parse()

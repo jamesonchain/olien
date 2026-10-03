@@ -160,8 +160,24 @@ async fn index_account(
     } else {
         refresh_balances_and_lanes(client, pool, account).await?;
     }
+    // What gates execution, held against a second endpoint when there is one. A
+    // difference keeps everything on this account from being marked ready until the
+    // two agree again.
+    if client.has_witness() {
+        let keys: Vec<(String,)> = sqlx::query_as("SELECT nonce_key FROM olien_lanes WHERE olien_id = $1").bind(account.id).fetch_all(pool).await?;
+        let lanes: Vec<U256> = keys.iter().map(|(key,)| U256::from_str_radix(key, 10).unwrap_or(U256::ZERO)).collect();
+        match client.disagreement(address, &lanes).await {
+            Ok(Some(what)) => {
+                warn!("the two RPCs disagree about {} for {}: nothing on it is marked ready", what, account.address);
+                treasury::mark_disputed(account.id, true);
+            }
+            Ok(None) => treasury::mark_disputed(account.id, false),
+            Err(e) => warn!("could not hold {} against the second RPC: {e:#}", account.address),
+        }
+    }
     let fresh = treasury::load_account_by_id(pool, account.id).await.map_err(|e| anyhow::anyhow!("{}", e.parts().1))?;
     treasury::refresh_statuses(pool, &fresh).await.map_err(|e| anyhow::anyhow!("{}", e.parts().1))?;
+    treasury_cheques::issue_waiting(pool, &fresh).await.map_err(|e| anyhow::anyhow!("{}", e.parts().1))?;
     // A cheque is cashed on the token, not on the account, so its state is asked for.
     treasury_cheques::refresh(pool, client, account.id, address).await?;
     Ok(())
