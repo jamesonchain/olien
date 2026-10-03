@@ -694,6 +694,17 @@ table records that backend's twenty-five migrations, this crate carries eight wi
 different contents, and sqlx refuses to boot on the difference. That decision comes
 before the rest of phase 2, because nothing else in phase 2 reaches a user without it.
 
+**Phase 2, what is built, 2026-10-04.** Committed, tested on a local chain carrying
+the canonical deployment, and waiting on the move in `15-own-service.md` to reach a
+user: the service refuses to start against anything but Olien v1 (L6); API keys end
+(L10); the synced flag is stored and shown (M6, service half); an Olien can be opened
+from the chain by a signer, which makes the claim that the database is convenience
+and not authority true for the account row too; L11's pinned deployment. Live on
+olien.org already, because it needs nothing from the service: the browser runs a
+proposal's calls itself and sets the account's balance against what would leave (M2).
+Not built: the soft policy and the signed address book under it (C1's service half,
+M5), the audit trail and rate limiter (M3), the second RPC (M4).
+
 ## Sources
 
 Vendor documentation and APIs, fetched 2026-09-29. Marketing pages are marked.

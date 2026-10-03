@@ -131,6 +131,13 @@ ops/monad-check.sh              # testnet, 10143
 ops/monad-check.sh --mainnet    # mainnet, 143
 ```
 
+**A local chain** with Olien at the addresses it holds everywhere else, a token standing
+in for USDC, and the commands to run the service against it.
+
+```sh
+ops/local-chain.sh
+```
+
 **Deploying** to a chain. Simulates unless told otherwise, skips what is already there,
 and stops if the pinned bytes no longer predict their recorded addresses.
 
@@ -148,6 +155,9 @@ rather than a constant.
 A passkey is bound to the domain that created it and cannot be moved to another one.
 `NEXT_PUBLIC_PASSKEY_RP_ID` exists so that binding is a deployment decision rather than
 an accident of which URL someone happened to open.
+
+`docs/15-own-service.md` is how the console on olien.org moves onto the service in this
+repository, which as of 2026-10-04 it is not on.
 
 `docs/10-account-spec.md` is the contract, normatively. `docs/12-metropolis.md` records
 what has been proved on chain, with transaction hashes.
