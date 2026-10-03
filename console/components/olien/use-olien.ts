@@ -2,13 +2,16 @@
 
 import { useQuery, type QueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { olienPublicClient as publicClient } from "@/lib/chain";
+import { BaseError, parseAbi } from "viem";
+import { decodeContext, olienPublicClient as publicClient } from "@/lib/chain";
+import { decodeCalls, outgoing, type RawCall } from "@/lib/signing";
 import {
   errorMessage,
   getAccount,
   getAccounts,
   getAddressBook,
   getApiKeys,
+  getChainInfo,
   getCheques,
   getPayrolls,
   getWebhookDeliveries,
@@ -47,6 +50,15 @@ export const olienKeys = {
   deliveries: (address: string, id: number) => ["olien", "webhook-deliveries", address, id] as const,
   nativeBalance: (address: string) => ["olien", "native-balance", address] as const,
 };
+
+// What the service this console is talking to can do. The console offers a thing only
+// when the service names it, so it never shows a form the service cannot answer or
+// promises an expiry the service does not keep.
+export function useServiceFeatures(): (feature: string) => boolean {
+  const info = useQuery({ queryKey: ["olien", "chain-info"], queryFn: getChainInfo, staleTime: 5 * 60_000 });
+  const features = info.data?.features ?? [];
+  return (feature) => features.includes(feature);
+}
 
 export function useAccounts(enabled = true) {
   return useQuery({ queryKey: olienKeys.accounts, queryFn: getAccounts, refetchInterval: POLL_MS, enabled });
@@ -135,6 +147,71 @@ export function useNativeBalance(address: string | null | undefined) {
     queryFn: () => publicClient.getBalance({ address: address as Hex }),
     enabled: Boolean(address),
     refetchInterval: 15_000,
+  });
+}
+
+export interface BrowserSimulation {
+  ran: number;
+  // Calls to the account itself: they run after their delay, as the account, and
+  // cannot be run from outside it.
+  skipped: number;
+  failures: { index: number; reason: string }[];
+  short: { symbol: string; decimals: number; needs: bigint; holds: bigint }[];
+  checkedAt: number;
+}
+
+const BALANCE_OF = parseAbi(["function balanceOf(address owner) view returns (uint256)"]);
+
+// A revert is an answer; a chain that cannot be reached is not. Only the first is a
+// verdict on the transaction, so the second is thrown for the query to report.
+function revertReason(cause: unknown): string {
+  if (cause instanceof BaseError) {
+    if (cause.walk((error) => error instanceof Error && (error.name === "HttpRequestError" || error.name === "TimeoutError"))) throw cause;
+    const reverted = cause.walk((error) => error instanceof Error && error.name === "ExecutionRevertedError");
+    const reason = reverted instanceof BaseError ? reverted.shortMessage : cause.shortMessage;
+    return reason.replace(/^Execution reverted with reason: /, "").replace(/\.$/, "");
+  }
+  throw cause;
+}
+
+// The transaction's calls, run by this browser against the chain it is built for, from
+// the account's own address. The service runs them too and reports a verdict, but a
+// verdict is a claim, and the security model's defence against a service that lies
+// about what calldata does is that the client runs it. Each call is run on its own
+// against the chain as it stands, so a batch whose later call needs an earlier one can
+// read as failing; what the account holds is checked against the whole batch at once.
+export function useBrowserSimulation(address: string, calls: RawCall[], enabled: boolean) {
+  const key = calls.map((call) => `${call.to}:${call.value}:${call.data}`).join("|");
+  return useQuery({
+    queryKey: ["olien", "simulation", address, key],
+    enabled,
+    staleTime: 20_000,
+    refetchInterval: 30_000,
+    retry: 1,
+    queryFn: async (): Promise<BrowserSimulation> => {
+      const account = address as Hex;
+      const failures: BrowserSimulation["failures"] = [];
+      let ran = 0;
+      let skipped = 0;
+      for (const [index, call] of calls.entries()) {
+        if (call.to.toLowerCase() === address.toLowerCase()) {
+          skipped += 1;
+          continue;
+        }
+        ran += 1;
+        try {
+          await publicClient.call({ account, to: call.to as Hex, data: (call.data || "0x") as Hex, value: BigInt(call.value) });
+        } catch (cause) {
+          failures.push({ index, reason: revertReason(cause) });
+        }
+      }
+      const short: BrowserSimulation["short"] = [];
+      for (const sum of outgoing(decodeCalls(calls, decodeContext(address)))) {
+        const holds = sum.token ? await publicClient.readContract({ address: sum.token.address as Hex, abi: BALANCE_OF, functionName: "balanceOf", args: [account] }) : await publicClient.getBalance({ address: account });
+        if (holds < sum.amount) short.push({ symbol: sum.token?.symbol ?? decodeContext(address).native.symbol, decimals: sum.token?.decimals ?? decodeContext(address).native.decimals, needs: sum.amount, holds });
+      }
+      return { ran, skipped, failures, short, checkedAt: nowSeconds() };
+    },
   });
 }
 

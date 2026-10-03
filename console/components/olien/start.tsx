@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { errorMessage, formatUsdc, importAccount, isValidAddress, shortAddress, TreasuryError } from "@/lib/treasury";
 import { Button, Disclosure, Field, InlineError, Loading, Pill, plural } from "./ui";
-import { lastAccount, olienKeys, rememberAccount, useAccounts } from "./use-olien";
+import { lastAccount, olienKeys, rememberAccount, useAccounts, useServiceFeatures } from "./use-olien";
 import { useWalletSession } from "./wallet";
 
 // An Olien is on the chain whether or not this service has heard of it: one made
@@ -65,6 +65,7 @@ function OpenExisting() {
 // opened first, and the create card always reachable.
 export function OlienStart() {
   const accounts = useAccounts();
+  const serviceCan = useServiceFeatures();
   const { address } = useWalletSession();
   const [last] = useState<string | null>(() => (typeof window === "undefined" ? null : lastAccount()));
 
@@ -119,7 +120,7 @@ export function OlienStart() {
       {!accounts.isLoading && !accounts.error && rows.length === 0 ? (
         <p className="olien-muted">No Olien names your wallet as a signer yet. Create one, or ask a member to add {address ? shortAddress(address) : "your wallet"}.</p>
       ) : null}
-      {!accounts.isLoading ? <OpenExisting /> : null}
+      {!accounts.isLoading && serviceCan("import") ? <OpenExisting /> : null}
     </div>
   );
 }

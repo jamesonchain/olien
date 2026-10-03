@@ -518,6 +518,8 @@ export interface ChainInfo {
   entryPoint: string | null;
   factory: string | null;
   implementation: string | null;
+  // What the service does beyond the first version of its API; absent from an older one.
+  features?: string[];
 }
 
 export const getChainInfo = () => request<ChainInfo>("/chain");
@@ -874,7 +876,7 @@ export const signCheque = (address: string, id: number, body: { signerId: string
 export const voidCheque = (address: string, id: number) => request<TreasuryCheque | void>(`/accounts/${address}/cheques/${id}/void`, post({}));
 
 export const getApiKeys = (address: string) => request<ApiKey[]>(`/accounts/${address}/api-keys`);
-export const mintApiKey = (address: string, name: string, scope: ApiKeyScope, expiresInDays: number) =>
-  request<MintedApiKey>(`/accounts/${address}/api-keys`, post({ name, scope, expiresInDays }));
+export const mintApiKey = (address: string, name: string, scope: ApiKeyScope, expiresInDays?: number) =>
+  request<MintedApiKey>(`/accounts/${address}/api-keys`, post(expiresInDays ? { name, scope, expiresInDays } : { name, scope }));
 export const revokeApiKey = (address: string, id: number) =>
   request<void>(`/accounts/${address}/api-keys/${id}`, { method: "DELETE" });

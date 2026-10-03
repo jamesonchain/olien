@@ -1768,10 +1768,16 @@ strong > .olien-tag {
 
 .olien-sim {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   font-size: 13px;
+  line-height: 1.45;
   color: var(--text-muted);
+}
+
+.olien-sim > svg {
+  flex: none;
+  margin-top: 3px;
 }
 
 .olien-sim.is-ok {

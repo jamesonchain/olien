@@ -68,7 +68,13 @@ pub struct ChainInfo {
     pub entry_point: Option<String>,
     pub factory: Option<String>,
     pub implementation: Option<String>,
+    /// What this service does beyond the first version of its API. A console offers a
+    /// thing only when the service it is talking to names it here, so one console build
+    /// tells the truth against an older service and a newer one.
+    pub features: &'static [&'static str],
 }
+
+pub const FEATURES: &[&str] = &["import", "key-expiry", "synced"];
 
 #[derive(Debug)]
 pub enum TreasuryError {

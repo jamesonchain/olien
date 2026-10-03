@@ -331,6 +331,26 @@ export function summarise(actions: Action[], ctx: DecodeContext): string {
     .join("; ")}${actions.length > 3 ? "; and more" : ""}`;
 }
 
+export interface Outgoing {
+  // Null is the chain's own gas token.
+  token: TokenInfo | null;
+  amount: bigint;
+}
+
+// What leaves the account if every call runs, per token: the figure to hold against
+// what the account has.
+export function outgoing(actions: Action[]): Outgoing[] {
+  const sums = new Map<string, Outgoing>();
+  for (const action of actions) {
+    const entry = action.type === "transfer" ? { key: action.token.address.toLowerCase(), token: action.token, amount: action.amount } : action.type === "native" ? { key: "", token: null, amount: action.amount } : null;
+    if (!entry) continue;
+    const sum = sums.get(entry.key);
+    if (sum) sum.amount += entry.amount;
+    else sums.set(entry.key, { token: entry.token, amount: entry.amount });
+  }
+  return [...sums.values()];
+}
+
 // ----------------------------------------------------------------- the proposer's words
 
 export interface Annotation {

@@ -8,7 +8,7 @@ import { useState } from "react";
 import { encodeFunctionData } from "viem";
 import { useSendTransaction, useSignTypedData } from "wagmi";
 import { chainName, chainSpec, decodeContext, nativeSymbol, olienPublicClient as publicClient } from "@/lib/chain";
-import { annotate, checkOperation, decodeCalls, describeAction, formatAmount, kindOf, OLIEN_ABI, type Action as CallAction, type Annotation, type DecodeContext } from "@/lib/signing";
+import { annotate, checkOperation, decodeCalls, describeAction, formatAmount, kindOf, OLIEN_ABI, type Action as CallAction, type Annotation, type DecodeContext, type RawCall } from "@/lib/signing";
 import {
   cancelProposal,
   confirmProposal,
@@ -33,7 +33,7 @@ import {
   type ProposalView,
 } from "@/lib/treasury";
 import { AddressChip, Button, CopyButton, Countdown, cx, Disclosure, InlineError, KeyValue, Loading, Note, Panel, plural, proposerLabel, Spinner, StatusPill, Tag, TxChip } from "./ui";
-import { accountError, applyProposal, olienKeys, useNow, useOlienAccount, useProposal, useVetoCall } from "./use-olien";
+import { accountError, applyProposal, olienKeys, useBrowserSimulation, useNow, useOlienAccount, useProposal, useVetoCall } from "./use-olien";
 import { friendlyPasskeyError, knownPasskeys, passkeySupported, signWithPasskey } from "@/lib/passkey";
 import { friendlyWalletError, useOlienChain, useWalletSession, walletSigner } from "./wallet";
 
@@ -81,6 +81,45 @@ function ActionRow({ index, action, note, ctx }: { index: number; action: CallAc
         {action.type === "rule" && action.danger ? <small className="olien-call-warn">{DANGER_NOTES[action.name] ?? "Read this change twice."}</small> : null}
       </div>
     </li>
+  );
+}
+
+// What happens when this browser runs the calls itself. The service's own verdict is
+// mentioned only where it differs, because a difference is the thing worth seeing.
+function SimulationLine({ address, calls, service }: { address: string; calls: RawCall[]; service: ProposalView["simulation"] }) {
+  const simulation = useBrowserSimulation(address, calls, true);
+  if (simulation.isLoading) {
+    return (
+      <div className="olien-sim">
+        <Spinner size={13} /> Running these calls against {chainName} from this browser.
+      </div>
+    );
+  }
+  if (simulation.error || !simulation.data) {
+    return (
+      <div className="olien-sim">
+        This browser could not reach {chainName} to run these calls itself.
+        {service ? (service.ok ? " The service reports that they did not revert when it ran them." : ` The service reports that they revert: ${service.error ?? "no reason given"}.`) : ""}
+      </div>
+    );
+  }
+  const { ran, skipped, failures, short, checkedAt } = simulation.data;
+  const ok = failures.length === 0 && short.length === 0;
+  const disagrees = service != null && ran > 0 && service.ok !== (failures.length === 0);
+  return (
+    <div className={cx("olien-sim", ok ? "is-ok" : "is-fail")}>
+      {ok ? <Check size={14} /> : <X size={14} />}
+      <span>
+        {ran === 0
+          ? "Nothing here can be run ahead of time: a rule change takes effect after its delay, as the account itself."
+          : failures.length === 0
+            ? `This browser ran ${ran === 1 ? "the call" : `each of the ${ran} calls`} from the account's address and ${ran === 1 ? "it did not revert" : "none reverted"}.`
+            : failures.map((failure) => `Call ${failure.index + 1} reverts when this browser runs it: ${failure.reason}.`).join(" ")}
+        {short.map((entry) => ` The account holds ${formatAmount(entry.holds, entry.decimals)} ${entry.symbol} and this sends ${formatAmount(entry.needs, entry.decimals)}.`).join("")}
+        {ran > 0 && skipped > 0 ? " The rule changes in it were not run: they take effect after their delay." : ""} Checked {formatTime(checkedAt)}.
+        {disagrees ? " The service reports otherwise, which is worth knowing before you sign." : ""}
+      </span>
+    </div>
   );
 }
 
@@ -595,21 +634,7 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
               </div>
             ) : null}
 
-            <div className={cx("olien-sim", view.simulation ? (view.simulation.ok ? "is-ok" : "is-fail") : "")}>
-              {view.simulation ? (
-                view.simulation.ok ? (
-                  <>
-                    <Check size={14} /> The service ran these calls and they did not revert, checked {formatTime(view.simulation.checkedAt)}.
-                  </>
-                ) : (
-                  <>
-                    <X size={14} /> The service ran these calls and they revert: {view.simulation.error ?? "no reason given"}. Checked {formatTime(view.simulation.checkedAt)}.
-                  </>
-                )
-              ) : (
-                "The service has not run these calls yet."
-              )}
-            </div>
+            {signable ? <SimulationLine address={address} calls={fields.calls} service={view.simulation} /> : null}
 
             <KeyValue
               items={[

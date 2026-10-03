@@ -12,6 +12,7 @@ import {
   loginMessage,
   messageHash,
   OLIEN_ABI,
+  outgoing,
   operationCalls,
   summarise,
   transactionHash,
@@ -113,6 +114,15 @@ test("a proposal is named for what it does", () => {
   assert.equal(summarise(batch, ctx), "Send 2.00 USDC to 2 recipients");
   assert.equal(kindOf(decodeCalls([self("setThreshold", [2])], ctx)), "Rule change");
   assert.equal(kindOf(decodeCalls([{ to: USDC, value: "0", data: TRANSFER }, { to: PAYEE, value: "0", data: "0x12345678" }], ctx)), "Contract call");
+});
+
+test("what leaves the account is summed per token", () => {
+  const actions = decodeCalls(
+    [{ to: USDC, value: "0", data: TRANSFER }, { to: USDC, value: "0", data: TRANSFER }, { to: PAYEE, value: "5", data: "0x" }, self("setThreshold", [2])],
+    ctx,
+  );
+  assert.deepEqual(outgoing(actions), [{ token: ctx.tokens[0], amount: 2_000_000n }, { token: null, amount: 5n }]);
+  assert.deepEqual(outgoing(decodeCalls([self("setThreshold", [2])], ctx)), []);
 });
 
 test("a description is attached only when it agrees with the calldata", () => {

@@ -49,7 +49,7 @@ import {
   type MintedApiKey,
 } from "@/lib/treasury";
 import { AddressChip, Button, CopyButton, cx, DurationInput, EmptyState, Field, InlineError, KeyValue, Loading, Note, Panel, Pill, plural, Table, Tabs, TxChip } from "./ui";
-import { accountError, applyProposal, olienKeys, useAddressBook, useApiKeys, useLedger, useOlienAccount, useWebhookDeliveries, useWebhooks } from "./use-olien";
+import { accountError, applyProposal, olienKeys, useAddressBook, useApiKeys, useLedger, useOlienAccount, useServiceFeatures, useWebhookDeliveries, useWebhooks } from "./use-olien";
 import { AddressInput } from "./recipients";
 import { friendlyWalletError, useOlienChain, useWalletSession, walletSigner } from "./wallet";
 import { chainName, chainSpec, olienPublicClient } from "@/lib/chain";
@@ -880,6 +880,7 @@ function ApiKeyRow({ address, item }: { address: string; item: ApiKey }) {
 function ApiKeysSection({ address }: { address: string }) {
   const queryClient = useQueryClient();
   const keys = useApiKeys(address);
+  const expires = useServiceFeatures()("key-expiry");
   const [name, setName] = useState("");
   const [scope, setScope] = useState<ApiKeyScope>("read");
   const [days, setDays] = useState(90);
@@ -891,7 +892,7 @@ function ApiKeysSection({ address }: { address: string }) {
     setBusy(true);
     setError(null);
     try {
-      const fresh = await mintApiKey(address, name.trim(), scope, days);
+      const fresh = await mintApiKey(address, name.trim(), scope, expires ? days : undefined);
       setMinted(fresh);
       setName("");
       await queryClient.invalidateQueries({ queryKey: olienKeys.apiKeys(address) });
@@ -906,8 +907,8 @@ function ApiKeysSection({ address }: { address: string }) {
     <Panel title="API keys">
       <p className="olien-muted olien-section-lede">
         For payroll and accounting tools. A read key sees what you see. A propose key can also put transfers in the queue, where they need the same
-        signatures as any other. No key can sign, execute, or change who the members are. Every key has a last day, so one that is forgotten stops by
-        itself.
+        signatures as any other. No key can sign, execute, or change who the members are.
+        {expires ? " Every key has a last day, so one that is forgotten stops by itself." : ""}
       </p>
       <form
         className="olien-inline-form"
@@ -929,11 +930,13 @@ function ApiKeysSection({ address }: { address: string }) {
           <option value="read">Read only</option>
           <option value="propose">Read and propose</option>
         </select>
-        <select className="olien-input olien-input--short" value={days} disabled={busy} aria-label="How long the key lasts" onChange={(event) => setDays(Number(event.target.value))}>
-          <option value={30}>For 30 days</option>
-          <option value={90}>For 90 days</option>
-          <option value={365}>For a year</option>
-        </select>
+        {expires ? (
+          <select className="olien-input olien-input--short" value={days} disabled={busy} aria-label="How long the key lasts" onChange={(event) => setDays(Number(event.target.value))}>
+            <option value={30}>For 30 days</option>
+            <option value={90}>For 90 days</option>
+            <option value={365}>For a year</option>
+          </select>
+        ) : null}
         <Button type="submit" variant="primary" disabled={busy || !name.trim()} icon={<KeyRound size={14} />}>
           {busy ? "Creating" : "Create key"}
         </Button>
@@ -965,7 +968,7 @@ function ApiKeysSection({ address }: { address: string }) {
       ) : !keys.data || keys.data.length === 0 ? (
         <EmptyState title="No keys" hint="A key lets a system read this account, or put payouts in the queue for the members to sign." />
       ) : (
-        <Table head={["Name", "Can", "Key", "Made by", "Last used", "Expires", ""]}>
+        <Table head={["Name", "Can", "Key", "Made by", "Last used", expires ? "Expires" : "", ""]}>
           {keys.data.map((item) => (
             <ApiKeyRow key={item.id} address={address} item={item} />
           ))}

@@ -185,6 +185,7 @@ fn build_treasury(config: &Config) -> Result<Treasury> {
         entry_point: Some(format!("{:#x}", deployment.entry_point)),
         factory: Some(format!("{:#x}", deployment.factory)),
         implementation: Some(format!("{:#x}", deployment.implementation)),
+        features: treasury::FEATURES,
     };
 
     Ok(Treasury {
