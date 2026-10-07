@@ -155,11 +155,16 @@ pub async fn verify_v2(client: &OlienClient, deployment: &OlienV2Deployment) -> 
         Err(reason) => return VerdictV2::Mismatch(reason),
     };
     let empty = alloy::primitives::keccak256([]);
+    // A book whose expected hash is the hash of nothing would make every empty address
+    // look deployed; that book was pinned from a failed dry run and is refused.
+    if wanted.iter().any(|(_, _, hash)| *hash == empty) {
+        return VerdictV2::Mismatch("the v2 book expects empty code somewhere; it was not pinned from a build".into());
+    }
     let mut present = 0;
     for (name, address, hash) in &wanted {
         match client.code_hash(*address).await {
-            Ok(found) if found == *hash => present += 1,
             Ok(found) if found == empty => {}
+            Ok(found) if found == *hash => present += 1,
             Ok(found) => return VerdictV2::Mismatch(format!("the code at the {name} {address:#x} hashes to {found:#x}; Olien v2's hashes to {hash:#x}")),
             Err(error) => return VerdictV2::Unreachable(format!("{error:#}")),
         }
@@ -236,6 +241,15 @@ mod tests {
         assert_eq!(wanted.len(), 4);
         assert!(wanted.iter().all(|(_, _, hash)| !hash.is_zero()));
         assert_eq!(implementation_v2_code_hash(), wanted[2].2);
+    }
+
+    #[test]
+    fn the_v2_book_expects_real_code_everywhere() {
+        let empty = alloy::primitives::keccak256([]);
+        for (name, _, hash) in expected_v2(&monad_v2()).unwrap() {
+            assert_ne!(hash, empty, "{name}: the book's runtime hash is the hash of empty code");
+        }
+        assert_ne!(book_v2().account_code_hash, empty);
     }
 
     #[test]

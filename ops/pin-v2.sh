@@ -42,7 +42,19 @@ predict() {
   digest="$(cast keccak "$(cast concat-hex 0xff "$DEPLOYER" "$1" "$(cast keccak "$2")")")"
   cast to-check-sum-address "0x${digest: -40}"
 }
-runtime_hash() { cast keccak "$(cast call --create "$1" --rpc-url "$RPC")"; }
+# The runtime code is what the constructor leaves behind, so the creation is simulated
+# and its result hashed. A simulation that answers nothing would hash to the hash of
+# empty code, which is what every undeployed address hashes to, so that answer is refused.
+runtime_hash() {
+  local code hash
+  code="$(cast call --rpc-url "$RPC" --create "$1")"
+  hash="$(cast keccak "$code")"
+  if [ "$hash" = "$(cast keccak 0x)" ]; then
+    echo "a constructor simulation answered nothing; refusing to pin the hash of empty code" >&2
+    exit 1
+  fi
+  echo "$hash"
+}
 
 VERIFIER_INIT="$(artifact OlienVerifierV2)"
 VERIFIER_SALT="$(salt verifier)"
@@ -59,7 +71,7 @@ IMPL="$(predict "$IMPL_SALT" "$IMPL_INIT")"
 # v1's factory bytes end with its constructor argument; the same bytes with v2's.
 V1_FACTORY_INIT="$(jq -r .contracts.factory.initCode "$V1")"
 TAIL="${V1_FACTORY_INIT: -64}"
-[ "0x$TAIL" = "$(cast to-uint256 "$V1_IMPL" 2>/dev/null || cast abi-encode 'c(address)' "$V1_IMPL")" ] || {
+[ "0x$TAIL" = "$(cast abi-encode 'c(address)' "$V1_IMPL")" ] || {
   echo "v1's factory bytes do not end with v1's implementation address; refusing to guess"; exit 1; }
 FACTORY_INIT="${V1_FACTORY_INIT:0:${#V1_FACTORY_INIT}-64}$(cast abi-encode 'c(address)' "$IMPL" | cut -c3-)"
 FACTORY_SALT="$(salt factory)"
