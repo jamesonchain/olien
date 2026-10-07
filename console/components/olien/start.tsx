@@ -18,15 +18,21 @@ function OpenExisting() {
   const queryClient = useQueryClient();
   const [address, setAddress] = useState("");
   const [name, setName] = useState("");
+  const [fromBlock, setFromBlock] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
     setError(null);
     if (!isValidAddress(address)) return setError("Enter the Olien's address.");
+    if (fromBlock.trim() && !/^\d{1,12}$/.test(fromBlock.trim())) return setError("The block is a number, from the explorer.");
     setBusy(true);
     try {
-      const view = await importAccount({ address: address.toLowerCase(), ...(name.trim() ? { name: name.trim() } : {}) });
+      const view = await importAccount({
+        address: address.toLowerCase(),
+        ...(name.trim() ? { name: name.trim() } : {}),
+        ...(fromBlock.trim() ? { fromBlock: Number(fromBlock.trim()) } : {}),
+      });
       rememberAccount(view.address);
       await queryClient.invalidateQueries({ queryKey: olienKeys.accounts });
       router.push(`/${view.address}`);
@@ -49,6 +55,9 @@ function OpenExisting() {
         </Field>
         <Field label="Name (optional)">
           <input className="olien-input" value={name} placeholder="Operations" maxLength={80} disabled={busy} onChange={(event) => setName(event.target.value)} />
+        </Field>
+        <Field label="History from block (optional)" hint="The block the Olien was created in, from the explorer. Its ledger fills in from there; left empty, it starts now.">
+          <input className="olien-input num" value={fromBlock} inputMode="numeric" placeholder="12345678" disabled={busy} onChange={(event) => setFromBlock(event.target.value.trim())} />
         </Field>
       </div>
       <InlineError message={error} />

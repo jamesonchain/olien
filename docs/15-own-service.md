@@ -76,6 +76,28 @@ that database.
    what moves it.
 7. **Each team opens its Olien** from the start page, by address.
 
+## Where the move stands, 7 October 2026
+
+Done, in a Railway project of its own named `olien`, so nothing of it sits inside
+another product's project:
+
+| | |
+| --- | --- |
+| Service | `olien-service`, at `https://olien-service-production.up.railway.app`, built from this repository's `Dockerfile` |
+| Database | `Postgres`, new and empty, referenced as `DATABASE_URL` |
+| Relayer | `0x3f6CacC63449952Fc8b519B781b21ceBc8f13BcB`, a key made on the service and held nowhere else |
+| Variables | `RELAYER_PK`, `DATABASE_URL`, `CORS_ALLOWED_ORIGINS` for olien.org, `RPC_URL_SECONDARY` on a second provider, `INDEX_INTERVAL_SECS` |
+| Domain | target port set to 8080 |
+
+Still to do, in this order:
+
+1. **Fund the relayer** above with MON on Monad testnet. Until then the service reads,
+   imports and serves, and cannot create an account or execute anything.
+2. **Point the console at it**: `NEXT_PUBLIC_BACKEND_URL` on the Vercel project, then
+   a production deploy.
+3. **Reopen each Olien** from the start page by address, giving the block it was
+   created in if its ledger should reach back that far.
+
 ## Going back
 
 Set `NEXT_PUBLIC_BACKEND_URL` to the old value and deploy. Nothing on the old side was

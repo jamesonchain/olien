@@ -1128,6 +1128,10 @@ async fn hashes_as_the_account_does(client: &OlienClient, chain_id: u64, account
 pub struct ImportBody {
     pub address: String,
     pub name: Option<String>,
+    /// Where the ledger starts. The block the account was created in gives it the whole
+    /// history; absent, history starts now. The indexer reads the chain forward from
+    /// here in its own time, so an old account takes a while to fill in.
+    pub from_block: Option<u64>,
 }
 
 /// Bring an Olien that already exists on the chain into this service.
@@ -1175,13 +1179,18 @@ pub async fn import_account(pool: &PgPool, treasury: &Treasury, user: i64, body:
         return Err(TreasuryError::Chain("the account's transaction hash does not match the service's; it was not added".into()));
     }
     let config = client.config(account).await.map_err(chain)?;
-    let block = client.block_number().await.map_err(chain)? as i64;
+    let head = client.block_number().await.map_err(chain)?;
+    let block = match body.from_block {
+        Some(from) if from > head => return Err(bad(format!("the chain is at block {head}; history cannot start after it"))),
+        Some(from) => from as i64,
+        None => head as i64,
+    };
     // created_by stays empty: the importer's standing is the chain's, as a signer, and
     // being the one who typed the address in gives nothing beyond that.
     sqlx::query(
         "INSERT INTO olien_accounts (address, chain_id, name, threshold, veto_threshold, config_delay, recovery_delay,
             recovery_cosign_delay, init, salt, status, created_block, indexed_block)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb, '', 'live', $9, $9) ON CONFLICT (address) DO NOTHING",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb, '', 'live', $9, $9 - 1) ON CONFLICT (address) DO NOTHING",
     )
     .bind(addr(account))
     .bind(treasury.chain_id as i64)

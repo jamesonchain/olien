@@ -470,7 +470,7 @@ export const createAccount = (body: CreateAccountBody) => request<AccountView>("
 export const getAccount = (address: string) => request<AccountView>(`/accounts/${address}`);
 // An Olien that is on the chain and not in this service: its rules, members and balance
 // are read from the chain. The caller has to be one of its signers.
-export const importAccount = (body: { address: string; name?: string }) => request<AccountView>("/accounts/import", post(body));
+export const importAccount = (body: { address: string; name?: string; fromBlock?: number }) => request<AccountView>("/accounts/import", post(body));
 
 export const getProposals = (address: string, statuses?: ProposalStatus[]) =>
   request<ProposalView[]>(
