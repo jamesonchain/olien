@@ -89,13 +89,17 @@ another product's project:
 | Variables | `RELAYER_PK`, `DATABASE_URL`, `CORS_ALLOWED_ORIGINS` for olien.org, `RPC_URL_SECONDARY` on a second provider, `INDEX_INTERVAL_SECS` |
 | Domain | target port set to 8080 |
 
-Still to do, in this order:
+The console was pointed at it the same day: `NEXT_PUBLIC_BACKEND_URL` on the Vercel
+project, then a production deploy, checked by reading the served scripts for the old
+address (none) and the new one. olien.org talks to this service now.
+
+Still to do:
 
 1. **Fund the relayer** above with MON on Monad testnet. Until then the service reads,
-   imports and serves, and cannot create an account or execute anything.
-2. **Point the console at it**: `NEXT_PUBLIC_BACKEND_URL` on the Vercel project, then
-   a production deploy.
-3. **Reopen each Olien** from the start page by address, giving the block it was
+   imports and serves, and cannot create an account or execute anything. The old
+   relayer still holds about 4 MON; three of them can be moved across with the old key
+   as Railway holds it, without the key ever being shown.
+2. **Reopen each Olien** from the start page by address, giving the block it was
    created in if its ledger should reach back that far.
 
 ## Going back
