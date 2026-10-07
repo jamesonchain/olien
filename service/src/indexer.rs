@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 
-use crate::olien::{IEntryPointView, IOlien, OlienClient, IERC20, PATH_RECOVERY, PATH_SINGLE, SCHEDULE_WINDOW};
+use crate::olien::{IEntryPointView, IOlien, IOlienPolicy, IOlienV2, OlienClient, IERC20, PATH_RECOVERY, PATH_SINGLE, SCHEDULE_WINDOW};
 use crate::payroll;
 use crate::webhooks;
 use crate::treasury::{self, AccountRow, RelayerStatus, Treasury};
@@ -208,6 +208,70 @@ async fn refresh_balances_and_lanes(client: &OlienClient, pool: &PgPool, account
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn limit_set(client: &OlienClient, pool: &PgPool, account: &AccountRow, id: u64, token: Address, from: Address, amount: u128, period: u64, any_destination: bool) -> anyhow::Result<()> {
+    let (remaining, reset_at, generation, _) = client.limit_budget_any(account.address(), id).await?;
+    sqlx::query(
+        "INSERT INTO olien_spending_limits (olien_id, limit_id, generation, token, from_address, amount, remaining, period, reset_at,
+            any_destination, signers, destinations, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '[]'::jsonb, '[]'::jsonb, 'active')
+         ON CONFLICT (olien_id, limit_id) DO UPDATE SET generation = EXCLUDED.generation, token = EXCLUDED.token,
+            from_address = EXCLUDED.from_address, amount = EXCLUDED.amount, remaining = EXCLUDED.remaining, period = EXCLUDED.period,
+            reset_at = EXCLUDED.reset_at, any_destination = EXCLUDED.any_destination, signers = '[]'::jsonb,
+            destinations = '[]'::jsonb, status = 'active'",
+    )
+    .bind(account.id)
+    .bind(id as i64)
+    .bind(generation as i64)
+    .bind(addr(token))
+    .bind(addr(from))
+    .bind(amount.to_string())
+    .bind(remaining.to_string())
+    .bind(period as i64)
+    .bind(reset_at as i64)
+    .bind(any_destination)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn limit_signer(pool: &PgPool, account: &AccountRow, id: u64, generation: u32, signer_id: B256) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE olien_spending_limits SET signers = (SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements(signers || to_jsonb(ARRAY[$3::text])) v)
+         WHERE olien_id = $1 AND limit_id = $2 AND generation = $4",
+    )
+    .bind(account.id)
+    .bind(id as i64)
+    .bind(hex(signer_id.as_slice()))
+    .bind(generation as i64)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn limit_destination(pool: &PgPool, account: &AccountRow, id: u64, generation: u32, to: Address) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE olien_spending_limits SET destinations = (SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements(destinations || to_jsonb(ARRAY[$3::text])) v)
+         WHERE olien_id = $1 AND limit_id = $2 AND generation = $4",
+    )
+    .bind(account.id)
+    .bind(id as i64)
+    .bind(addr(to))
+    .bind(generation as i64)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn limit_removed(pool: &PgPool, account: &AccountRow, id: u64) -> anyhow::Result<()> {
+    sqlx::query("UPDATE olien_spending_limits SET status = 'removed' WHERE olien_id = $1 AND limit_id = $2")
+        .bind(account.id)
+        .bind(id as i64)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn block_time(client: &OlienClient, cache: &mut HashMap<u64, u64>, number: u64) -> anyhow::Result<u64> {
     if let Some(t) = cache.get(&number) {
         return Ok(*t);
@@ -305,6 +369,40 @@ async fn apply(client: &OlienClient, pool: &PgPool, account: &AccountRow, log: &
                 .execute(pool)
                 .await?;
             warn!("{}: user operation {} reverted in {tx}", account.address, hex(event.userOpHash.as_slice()));
+        }
+        return Ok(false);
+    }
+
+    // A v2 account's limits live in the policy contract, which names the account as the
+    // first topic of each event; the rows they keep are the ones v1's events keep.
+    if client.v2.as_ref().is_some_and(|v| v.policy == log.address()) {
+        match topic0 {
+            t if t == IOlienPolicy::SpendingLimitSet::SIGNATURE_HASH => {
+                let event = IOlienPolicy::SpendingLimitSet::decode_log(&log.inner)?;
+                if event.account == address {
+                    limit_set(client, pool, account, event.id.to::<u64>(), event.token, event.from, event.amount, event.period.to::<u64>(), event.anyDestination).await?;
+                }
+            }
+            t if t == IOlienPolicy::LimitSignerAllowed::SIGNATURE_HASH => {
+                let event = IOlienPolicy::LimitSignerAllowed::decode_log(&log.inner)?;
+                if event.account == address {
+                    limit_signer(pool, account, event.id.to::<u64>(), event.generation, event.signerId).await?;
+                }
+            }
+            t if t == IOlienPolicy::LimitDestinationAllowed::SIGNATURE_HASH => {
+                let event = IOlienPolicy::LimitDestinationAllowed::decode_log(&log.inner)?;
+                if event.account == address {
+                    limit_destination(pool, account, event.id.to::<u64>(), event.generation, event.to).await?;
+                }
+            }
+            t if t == IOlienPolicy::SpendingLimitRemoved::SIGNATURE_HASH => {
+                let event = IOlienPolicy::SpendingLimitRemoved::decode_log(&log.inner)?;
+                if event.account == address {
+                    limit_removed(pool, account, event.id.to::<u64>()).await?;
+                }
+            }
+            // The policy and the known list are read from the chain by whoever shows them.
+            _ => {}
         }
         return Ok(false);
     }
@@ -447,71 +545,36 @@ async fn apply(client: &OlienClient, pool: &PgPool, account: &AccountRow, log: &
         t if t == IOlien::SpendingLimitSet::SIGNATURE_HASH => {
             let event = IOlien::SpendingLimitSet::decode_log(&log.inner)?;
             let id = event.id.to::<u64>();
-            let (remaining, reset_at, generation, _) = client.limit_budget(address, id).await?;
-            sqlx::query(
-                "INSERT INTO olien_spending_limits (olien_id, limit_id, generation, token, from_address, amount, remaining, period, reset_at,
-                    any_destination, signers, destinations, status)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '[]'::jsonb, '[]'::jsonb, 'active')
-                 ON CONFLICT (olien_id, limit_id) DO UPDATE SET generation = EXCLUDED.generation, token = EXCLUDED.token,
-                    from_address = EXCLUDED.from_address, amount = EXCLUDED.amount, remaining = EXCLUDED.remaining, period = EXCLUDED.period,
-                    reset_at = EXCLUDED.reset_at, any_destination = EXCLUDED.any_destination, signers = '[]'::jsonb,
-                    destinations = '[]'::jsonb, status = 'active'",
-            )
-            .bind(account.id)
-            .bind(id as i64)
-            .bind(generation as i64)
-            .bind(addr(event.token))
-            .bind(addr(event.from))
-            .bind(event.amount.to_string())
-            .bind(remaining.to_string())
-            .bind(event.period.to::<u64>() as i64)
-            .bind(reset_at as i64)
-            .bind(event.anyDestination)
-            .execute(pool)
-            .await?;
+            limit_set(client, pool, account, id, event.token, event.from, event.amount, event.period.to::<u64>(), event.anyDestination).await?;
             Ok(false)
         }
         t if t == IOlien::LimitSignerAllowed::SIGNATURE_HASH => {
             let event = IOlien::LimitSignerAllowed::decode_log(&log.inner)?;
-            sqlx::query(
-                "UPDATE olien_spending_limits SET signers = (SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements(signers || to_jsonb(ARRAY[$3::text])) v)
-                 WHERE olien_id = $1 AND limit_id = $2 AND generation = $4",
-            )
-            .bind(account.id)
-            .bind(event.id.to::<u64>() as i64)
-            .bind(hex(event.signerId.as_slice()))
-            .bind(event.generation as i64)
-            .execute(pool)
-            .await?;
+            limit_signer(pool, account, event.id.to::<u64>(), event.generation, event.signerId).await?;
             Ok(false)
         }
         t if t == IOlien::LimitDestinationAllowed::SIGNATURE_HASH => {
             let event = IOlien::LimitDestinationAllowed::decode_log(&log.inner)?;
-            sqlx::query(
-                "UPDATE olien_spending_limits SET destinations = (SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements(destinations || to_jsonb(ARRAY[$3::text])) v)
-                 WHERE olien_id = $1 AND limit_id = $2 AND generation = $4",
-            )
-            .bind(account.id)
-            .bind(event.id.to::<u64>() as i64)
-            .bind(addr(event.to))
-            .bind(event.generation as i64)
-            .execute(pool)
-            .await?;
+            limit_destination(pool, account, event.id.to::<u64>(), event.generation, event.to).await?;
             Ok(false)
         }
         t if t == IOlien::SpendingLimitRemoved::SIGNATURE_HASH => {
             let event = IOlien::SpendingLimitRemoved::decode_log(&log.inner)?;
-            sqlx::query("UPDATE olien_spending_limits SET status = 'removed' WHERE olien_id = $1 AND limit_id = $2")
-                .bind(account.id)
-                .bind(event.id.to::<u64>() as i64)
-                .execute(pool)
-                .await?;
+            limit_removed(pool, account, event.id.to::<u64>()).await?;
             Ok(false)
+        }
+        // v2's own events. A panic moves the epoch, which EpochAdvanced already says; a
+        // suspension changes a signer's flags; the fourth delay is read with the rest.
+        t if t == IOlienV2::DelaysChanged::SIGNATURE_HASH
+            || t == IOlienV2::SignerSuspended::SIGNATURE_HASH
+            || t == IOlienV2::Panicked::SIGNATURE_HASH =>
+        {
+            Ok(true)
         }
         t if t == IOlien::Spent::SIGNATURE_HASH => {
             let event = IOlien::Spent::decode_log(&log.inner)?;
             let id = event.id.to::<u64>();
-            if let Ok((remaining, reset_at, _, _)) = client.limit_budget(address, id).await {
+            if let Ok((remaining, reset_at, _, _)) = client.limit_budget_any(address, id).await {
                 sqlx::query("UPDATE olien_spending_limits SET remaining = $3, reset_at = $4 WHERE olien_id = $1 AND limit_id = $2")
                     .bind(account.id)
                     .bind(id as i64)

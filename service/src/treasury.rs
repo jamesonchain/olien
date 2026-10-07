@@ -70,6 +70,13 @@ pub struct ChainInfo {
     pub entry_point: Option<String>,
     pub factory: Option<String>,
     pub implementation: Option<String>,
+    /// v2's contracts (docs/16-account-v2.md), present only when the chain carries them.
+    /// The code hash is what a move to v2 names; a console hashes the code itself too.
+    pub factory_v2: Option<String>,
+    pub implementation_v2: Option<String>,
+    pub implementation_v2_code_hash: Option<String>,
+    pub policy: Option<String>,
+    pub verifier_v2: Option<String>,
     /// What this service does beyond the first version of its API. A console offers a
     /// thing only when the service it is talking to names it here, so one console build
     /// tells the truth against an older service and a newer one.
@@ -77,6 +84,9 @@ pub struct ChainInfo {
 }
 
 pub const FEATURES: &[&str] = &["import", "key-expiry", "synced", "signed-book", "policy", "audit"];
+/// With v2 on the chain: new accounts are made on it, and the console may offer the move,
+/// the transfer policy and the panic.
+pub const FEATURES_V2: &[&str] = &["import", "key-expiry", "synced", "signed-book", "policy", "audit", "v2"];
 
 #[derive(Debug)]
 pub enum TreasuryError {
@@ -1162,7 +1172,9 @@ pub async fn import_account(pool: &PgPool, treasury: &Treasury, user: i64, body:
     if client.code_hash(account).await.map_err(chain)? != canonical::account_code_hash() {
         return Err(bad("there is no Olien at this address on this chain"));
     }
-    if client.implementation(account).await.map_err(chain)? != client.deployment.implementation {
+    let implementation = client.implementation(account).await.map_err(chain)?;
+    let served = implementation == client.deployment.implementation || client.v2.as_ref().is_some_and(|v| v.implementation == implementation);
+    if !served {
         return Err(bad("this Olien runs an implementation this service does not serve"));
     }
     let signers = client.signers(account).await.map_err(chain)?;
@@ -2781,6 +2793,26 @@ pub async fn veto_operation(pool: &PgPool, treasury: &Treasury, user: i64, addre
         return Err(bad("this signer does not hold veto"));
     }
     let call = Call { to: ctx.row.address(), value: U256::ZERO, data: calldata::veto(parse_hash(tx_hash)?) };
+    single_operation(treasury, client, &ctx, call, signer_id).await
+}
+
+/// A panic as a user operation for a passkey signer to sign: one vetoer stops everything
+/// in flight (docs/16). A wallet signer calls `panic()` itself; a passkey has no wallet.
+pub async fn panic_operation(pool: &PgPool, treasury: &Treasury, user: i64, address: &str, signer_id: &str) -> Res<PreparedOperation> {
+    let client = treasury.client.as_ref().ok_or(TreasuryError::Off)?;
+    let ctx = context_for(pool, user, address).await?;
+    if !client.is_v2(ctx.row.address()).await.map_err(|e| TreasuryError::Chain(format!("{e:#}")))? {
+        return Err(TreasuryError::Conflict("only an account on version 2 has a panic".into()));
+    }
+    let signer_id = hex(parse_hash(signer_id)?.as_slice());
+    let signer = ctx.signers.iter().find(|s| s.signer_id == signer_id && s.status == "active").ok_or_else(|| bad("no such signer"))?;
+    if !key_based(signer) {
+        return Err(bad("this signer panics from its own wallet, not through an operation"));
+    }
+    if !signer.vetoes() {
+        return Err(bad("this signer does not hold veto"));
+    }
+    let call = Call { to: ctx.row.address(), value: U256::ZERO, data: calldata::panic() };
     single_operation(treasury, client, &ctx, call, signer_id).await
 }
 

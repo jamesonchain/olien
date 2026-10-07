@@ -3797,3 +3797,25 @@ strong > .olien-tag {
   margin-left: auto;
 }
 
+/* Version 2: the policy form, the known list and the brake. */
+.olien-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+.olien-known {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.olien-known h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.olien-mono {
+  font-family: var(--olien-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}

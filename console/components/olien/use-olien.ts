@@ -28,6 +28,7 @@ import {
   TreasuryError,
   type AccountView,
   type AddressBookEntry,
+  type ChainInfo,
   type Hex,
   type ProposalStatus,
   type ProposalView,
@@ -66,6 +67,105 @@ export function useServiceFeatures(): (feature: string) => boolean {
   const info = useQuery({ queryKey: ["olien", "chain-info"], queryFn: getChainInfo, staleTime: 5 * 60_000 });
   const features = info.data?.features ?? [];
   return (feature) => features.includes(feature);
+}
+
+export function useChainInfo() {
+  return useQuery({ queryKey: ["olien", "chain-info"], queryFn: getChainInfo, staleTime: 5 * 60_000 });
+}
+
+// Which implementation an account runs: the address the service recorded for it, held
+// against the ones the chain file names. v2 only where the service carries v2.
+export function accountVersion(account: AccountView | undefined, chain: ChainInfo | undefined): "v1" | "v2" | null {
+  if (!account || !chain) return null;
+  const implementation = account.implementation.toLowerCase();
+  if (chain.implementationV2 && implementation === chain.implementationV2.toLowerCase()) return "v2";
+  if (chain.implementation && implementation === chain.implementation.toLowerCase()) return "v1";
+  return null;
+}
+
+// v2's views (docs/16), read by this browser from its own RPC.
+const V2_VIEWS = parseAbi([
+  "struct ScheduledView { uint48 readyAt; uint64 epoch; uint8 path; bytes32 excluded; bytes32 callsHash; }",
+  "function getState() view returns (uint48 inactivityDelay, uint48 lastActivity, bool policyOn)",
+  "function getScheduledLog(uint256 from, uint256 limit) view returns (bytes32[])",
+  "function getScheduled(bytes32 hash) view returns (ScheduledView)",
+]);
+const POLICY_VIEWS = parseAbi([
+  "struct Policy { address token; uint128 tier; uint48 delay; bool requireKnown; bool learn; uint48 lockedUntil; }",
+  "struct Call { address to; uint256 value; bytes data; }",
+  "function policyOf(address account) view returns (Policy)",
+  "function knownSince(address account, address to) view returns (uint48)",
+  "function evaluate(Call[] calls) view returns (bool waits, uint48 delay)",
+]);
+
+export interface ChainPolicy {
+  token: string;
+  tier: bigint;
+  delay: number;
+  requireKnown: boolean;
+  learn: boolean;
+  lockedUntil: number;
+  inactivityDelay: number;
+  lastActivity: number;
+  policyOn: boolean;
+}
+
+// The account's own transfer policy and what v2 keeps beside it, from the chain.
+export function useChainPolicy(address: string, policyAddress: string | null | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: ["olien", "chain-policy", address],
+    enabled: enabled && Boolean(policyAddress),
+    refetchInterval: 20_000,
+    queryFn: async (): Promise<ChainPolicy> => {
+      const [p, state] = await Promise.all([
+        publicClient.readContract({ address: policyAddress as Hex, abi: POLICY_VIEWS, functionName: "policyOf", args: [address as Hex] }),
+        publicClient.readContract({ address: address as Hex, abi: V2_VIEWS, functionName: "getState" }),
+      ]);
+      return { token: p.token, tier: p.tier, delay: Number(p.delay), requireKnown: p.requireKnown, learn: p.learn, lockedUntil: Number(p.lockedUntil), inactivityDelay: Number(state[0]), lastActivity: Number(state[1]), policyOn: state[2] };
+    },
+  });
+}
+
+// When the account came to know each of these addresses on the chain; zero for never.
+export function useKnownOnChain(address: string, policyAddress: string | null | undefined, addresses: string[], enabled: boolean) {
+  const key = addresses.map((a) => a.toLowerCase()).sort().join(",");
+  return useQuery({
+    queryKey: ["olien", "known-on-chain", address, key],
+    enabled: enabled && Boolean(policyAddress),
+    refetchInterval: 20_000,
+    queryFn: async () => {
+      const out = new Map<string, number>();
+      for (const who of addresses) {
+        const since = await publicClient.readContract({ address: policyAddress as Hex, abi: POLICY_VIEWS, functionName: "knownSince", args: [address as Hex, who as Hex] });
+        out.set(who.toLowerCase(), Number(since));
+      }
+      return out;
+    },
+  });
+}
+
+// Whether the account's own policy would hold these calls, and for how long, asked of
+// the policy contract the way the account asks it: a call from the account's address.
+// The service is not consulted; a member sees the chain's own answer before signing.
+export function useBrowserPolicyHold(address: string, policyAddress: string | null | undefined, calls: RawCall[], enabled: boolean) {
+  const key = calls.map((call) => `${call.to}:${call.value}:${call.data}`).join("|");
+  return useQuery({
+    queryKey: ["olien", "policy-hold", address, key],
+    enabled: enabled && Boolean(policyAddress),
+    staleTime: 20_000,
+    queryFn: async (): Promise<{ waits: boolean; delay: number }> => {
+      const state = await publicClient.readContract({ address: address as Hex, abi: V2_VIEWS, functionName: "getState" });
+      if (!state[2]) return { waits: false, delay: 0 };
+      const [waits, delay] = await publicClient.readContract({
+        address: policyAddress as Hex,
+        abi: POLICY_VIEWS,
+        functionName: "evaluate",
+        args: [calls.map((call) => ({ to: call.to as Hex, value: BigInt(call.value), data: (call.data || "0x") as Hex }))],
+        account: address as Hex,
+      });
+      return { waits, delay: Number(delay) };
+    },
+  });
 }
 
 export function useAccounts(enabled = true) {
@@ -207,8 +307,11 @@ const ACCOUNT_VIEWS = parseAbi([
 // of a minute behind a change, so a difference is reported only when it is still there
 // the next time the chain is asked.
 export function useChainAgreement(address: string, account: AccountView | undefined): string | null {
+  const info = useChainInfo();
+  const version = accountVersion(account, info.data);
+  const scheduled = useScheduled(address);
   const chain = useQuery({
-    queryKey: ["olien", "chain-view", address],
+    queryKey: ["olien", "chain-view", address, version],
     enabled: Boolean(account),
     refetchInterval: 20_000,
     retry: 1,
@@ -218,7 +321,17 @@ export function useChainAgreement(address: string, account: AccountView | undefi
         publicClient.readContract({ address: target, abi: ACCOUNT_VIEWS, functionName: "getConfig" }),
         publicClient.readContract({ address: target, abi: ACCOUNT_VIEWS, functionName: "getSigners" }),
       ]);
-      return { epoch: Number(config.epoch), threshold: Number(config.threshold), signers: signers.map((id) => id.toLowerCase()).sort() };
+      // A v2 account lists every hash it ever scheduled; the ones still waiting in this
+      // epoch are what a service could be hiding, and the veto only helps while they wait.
+      const waiting: string[] = [];
+      if (version === "v2") {
+        const log = await publicClient.readContract({ address: target, abi: V2_VIEWS, functionName: "getScheduledLog", args: [0n, 500n] });
+        for (const hash of log) {
+          const entry = await publicClient.readContract({ address: target, abi: V2_VIEWS, functionName: "getScheduled", args: [hash] });
+          if (entry.readyAt !== 0 && Number(entry.epoch) === Number(config.epoch)) waiting.push(hash.toLowerCase());
+        }
+      }
+      return { epoch: Number(config.epoch), threshold: Number(config.threshold), signers: signers.map((id) => id.toLowerCase()).sort(), waiting };
     },
   });
   const difference = (() => {
@@ -227,6 +340,11 @@ export function useChainAgreement(address: string, account: AccountView | undefi
     if (chain.data.threshold !== account.threshold) return `the threshold is ${chain.data.threshold} on the chain and ${account.threshold} here`;
     const here = account.signers.map((signer) => signer.signerId.toLowerCase()).sort();
     if (here.length !== chain.data.signers.length || here.some((id, index) => id !== chain.data.signers[index])) return "the signers on the chain are not the signers shown here";
+    if (scheduled.data) {
+      const shown = new Set(scheduled.data.map((proposal) => proposal.txHash.toLowerCase()));
+      const hidden = chain.data.waiting.find((hash) => !shown.has(hash));
+      if (hidden) return `the chain holds a scheduled change this service does not show, ${hidden}`;
+    }
     return null;
   })();
   const [streak, setStreak] = useState(0);

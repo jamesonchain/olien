@@ -53,6 +53,7 @@ import {
 import { AddressChip, Button, CopyButton, cx, DurationInput, EmptyState, Field, InlineError, KeyValue, Loading, Note, Panel, Pill, plural, Table, Tabs, TxChip } from "./ui";
 import { accountError, applyProposal, olienKeys, useApiKeys, useLedger, useOlienAccount, useServiceFeatures, useSuggestions, useVerifiedBook, useWebhookDeliveries, useWebhooks, type VerifiedEntry } from "./use-olien";
 import { AuditSection, PolicySection } from "./policy";
+import { ChainPolicySection, VersionSection } from "./v2";
 import { AddressInput } from "./recipients";
 import { friendlyWalletError, useOlienChain, useWalletSession, walletSigner } from "./wallet";
 import { chainName, chainSpec, olienPublicClient } from "@/lib/chain";
@@ -1260,6 +1261,8 @@ export function OlienSettings({ address }: { address: string }) {
     <div className="olien-page olien-stack">
       <AddressesSection account={view} />
       <TimeLockSection address={address} account={view} />
+      {serviceCan("v2") ? <VersionSection address={address} account={view} /> : null}
+      {serviceCan("v2") ? <ChainPolicySection address={address} account={view} /> : null}
       {serviceCan("policy") ? <PolicySection address={address} account={view} /> : null}
       <LimitsSection address={address} account={view} />
       <AddressBookSection address={address} account={view} />

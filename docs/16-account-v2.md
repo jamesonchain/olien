@@ -243,16 +243,35 @@ move, with a limit before it and a panic after. New accounts come from a factory
 with the v2 implementation; `OlienFactory`'s source is unchanged and only needs the
 implementation address.
 
-What the clients must do before any account moves:
+What the clients do, as of 2026-10-07:
 
-1. **Console**: know the new selectors so the signing screen reads them (done in
-   `lib/signing.ts`), read the policy, the known list and the limits from OlienPolicy,
-   add a screen for the policy and a button for panic, and read `getScheduledLog`.
-2. **Service**: know the new selectors (done in `olien.rs`), index OlienPolicy's events
-   by the account topic, and predict a hold from the policy before a member signs.
-3. **Deployment**: `deployments/v2/creation.json` pinned the same way as v1's, from
-   this build, and the deploy script taught the second set. The addresses will differ
-   from v1's by construction.
+1. **Console**: the signing screen reads v2's calls; Settings shows which version an
+   account runs and proposes the move, with the code hash this browser computed from
+   the chain's bytes; a v2 account gets the transfer policy panel, the known-address
+   list held against the chain, and the brake, by wallet or by passkey; the signing
+   page asks the policy contract itself whether a transaction will be held; and the
+   chain-agreement check reads `getScheduledLog` and names a scheduled change the
+   service does not show.
+2. **Service**: knows the new selectors; carries v2's addresses from the chain file
+   and serves v2 only when its boot check finds the code at all four, v1 only until
+   then; makes new accounts on v2's factory when it does; indexes the policy contract's
+   limit events by the account topic; reads budgets from either place; opens an account
+   on either implementation; and prepares a panic operation for a passkey.
+3. **Deployment**: `ops/pin-v2.sh` wrote `deployments/v2/creation.json`; the four Monad
+   addresses are in `deployments/10143.json`; `ops/deploy-olien.sh --book v2` sends the
+   bytes; `ops/live-check.mjs` proves a v2 account end to end once the service carries
+   it.
+
+| | Monad testnet |
+| --- | --- |
+| verifier | `0x2aaeb413EA006f3Be4a3509Ef090d792C75657df` |
+| policy | `0x31d8b74ae00E4F186ad4D85905F59CA60C4e3C91` |
+| implementation | `0x319D127eA9f2E84cd65b353c41FBd1da3992B98b` |
+| factory | `0xf9Cca12e97E2af0516c554816873fb7c71743F50` |
+
+The same bytes through the same deployer land on the same four addresses on any chain
+with the EntryPoint and v1's sub-account implementation, so these are also v2's
+addresses on Arc.
 
 ## Known limits
 

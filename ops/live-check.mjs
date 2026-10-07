@@ -5,7 +5,7 @@
 //
 // RPC_URL and CHAIN_ID override the Monad testnet defaults.
 import { readFileSync } from "node:fs";
-import { createPublicClient, http, keccak256, parseAbi } from "../console/node_modules/viem/_esm/index.js";
+import { createPublicClient, encodeFunctionData, http, keccak256, parseAbi } from "../console/node_modules/viem/_esm/index.js";
 import { privateKeyToAccount, generatePrivateKey } from "../console/node_modules/viem/_esm/accounts/index.js";
 import { addressBookTypedData, loginMessage, transactionHash, transactionTypedData } from "../console/lib/signing.ts";
 
@@ -88,6 +88,41 @@ const trail = (await api(as(alice), "GET", `${base}/audit`)).body;
 check("the audit trail holds every act, and holds together", trail?.intact === true && ["account.created", "policy.changed", "book.added", "key.minted", "proposal.opened", "proposal.approved", "proposal.executed"].every((action) => trail.rows.some((row) => row.action === action)), brief(trail?.rows?.map((row) => row.action)));
 check("someone not yet a signer cannot open the account", (await api(as(carol), "POST", "/api/treasury/accounts/import", { address: account })).status === 403);
 check("a signer opening it again gets the same account", (await api(as(bob), "POST", "/api/treasury/accounts/import", { address: account })).body?.name?.startsWith("Service check"));
+// Version 2, when the service carries it (docs/16): the account was made on v2, a policy
+// the account itself enforces is set at once, a payment to a stranger is held by the
+// chain rather than run, and the account lists what it holds without the service.
+const chain = (await api(null, "GET", "/api/treasury/chain")).body;
+if (chain.features?.includes("v2")) {
+  check("the account was made on version 2", created.body.implementation?.toLowerCase() === chain.implementationV2.toLowerCase(), brief({ implementation: created.body.implementation, v2: chain.implementationV2 }));
+  const policyAbi = parseAbi(["struct Policy { address token; uint128 tier; uint48 delay; bool requireKnown; bool learn; uint48 lockedUntil; }", "function setTransferPolicy(Policy p)", "function policyOf(address account) view returns (Policy)"]);
+  const v2Abi = parseAbi(["struct ScheduledView { uint48 readyAt; uint64 epoch; uint8 path; bytes32 excluded; bytes32 callsHash; }", "function getState() view returns (uint48, uint48, bool)", "function getScheduledLog(uint256 from, uint256 limit) view returns (bytes32[])", "function getScheduled(bytes32 hash) view returns (ScheduledView)"]);
+  const erc20 = parseAbi(["function transfer(address to, uint256 amount) returns (bool)"]);
+  const setPolicy = encodeFunctionData({ abi: policyAbi, functionName: "setTransferPolicy", args: [{ token: chain.usdc, tier: 0n, delay: 3600, requireKnown: true, learn: true, lockedUntil: 0 }] });
+  const rule = await api(as(alice), "POST", `${base}/proposals`, { kind: "rule_change", intent: { description: "Set the transfer policy" }, calls: [{ to: account, value: "0", data: setPolicy }] });
+  check("a transfer policy is proposed as a rule change the console can read", rule.status === 200 && rule.body.calls?.[0]?.readable !== false, brief({ status: rule.body?.status, calls: rule.body?.calls }));
+  const sign = async (who, view) => api(as(who), "POST", `${base}/proposals/${view.txHash}/confirmations`, { signerId: signerId(who), signature: await who.signTypedData(transactionTypedData(CHAIN, account, view.typedData.message)) });
+  await sign(alice, rule.body);
+  await sign(bob, rule.body);
+  const ran = await api(as(bob), "POST", `${base}/proposals/${rule.body.txHash}/execute`);
+  check("tightening the policy runs as soon as the threshold signs", ran.status === 200 && ran.body.status === "executed", brief({ status: ran.body?.status, failure: ran.body?.failure }));
+  const onChain = await reader.readContract({ address: chain.policy, abi: policyAbi, functionName: "policyOf", args: [account] });
+  const state = await reader.readContract({ address: account, abi: v2Abi, functionName: "getState" });
+  check("the chain holds the policy and the account knows it is on", onChain.requireKnown === true && state[2] === true);
+  const pay = encodeFunctionData({ abi: erc20, functionName: "transfer", args: ["0x90F79bf6EB2c4f870365E785982E1f101E93b906", 0n] });
+  const held = await api(as(alice), "POST", `${base}/proposals`, { kind: "transfer", intent: { recipients: [{ to: "0x90F79bf6EB2c4f870365E785982E1f101E93b906", amount: "0" }] }, calls: [{ to: chain.usdc, value: "0", data: pay }] });
+  check("a payment to a stranger is proposed", held.status === 200, brief(held.body));
+  await sign(alice, held.body);
+  const readyHeld = (await sign(bob, held.body)).body;
+  const executing = Date.now();
+  const holdResult = await api(as(bob), "POST", `${base}/proposals/${held.body.txHash}/execute`);
+  const entry = await reader.readContract({ address: account, abi: v2Abi, functionName: "getScheduled", args: [held.body.txHash] });
+  check(`the chain holds it for an hour instead of running it, in ${((Date.now() - executing) / 1000).toFixed(0)}s`, holdResult.status === 200 && Number(entry.readyAt) > 0 && Math.abs(Number(entry.readyAt) - (now() + 3600)) < 120, brief({ status: holdResult.body?.status, readyAt: Number(entry.readyAt), ready: readyHeld?.status }));
+  const log = await reader.readContract({ address: account, abi: v2Abi, functionName: "getScheduledLog", args: [0n, 10n] });
+  check("the account lists what it holds, with no service in the way", log.some((hash) => hash.toLowerCase() === held.body.txHash.toLowerCase()), brief(log));
+  const trail2 = (await api(as(alice), "GET", `${base}/audit`)).body;
+  check("the audit trail still holds together", trail2?.intact === true);
+}
+
 const after = await reader.getBalance({ address: RELAYER });
 console.log(`relayer holds ${(Number(after) / 1e18).toFixed(4)} MON after; the run cost ${(Number(before - after) / 1e18).toFixed(4)} MON`);
 console.log(failures.length ? `\n${failures.length} check(s) failed.` : "\nEvery check passed.");

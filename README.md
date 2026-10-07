@@ -148,12 +148,21 @@ second pair of eyes the audit asked for on a service that could hide a change.
 2. **The relayer.** `0x3f6CacC63449952Fc8b519B781b21ceBc8f13BcB` pays for creations and
    executions on Monad testnet and holds just under 5 MON, which is where the health
    line starts saying low. A whole account life costs it about 0.05.
-3. **Version 2 needs a review, a deployment and its screens.** The contracts are
-   written and tested. Before any account moves: a second pair of eyes on
-   `contracts/src/v2/`, pinned bytes in `deployments/v2/` the way v1's are pinned,
-   the deploy script taught the second set, a console screen for the transfer policy
-   and a panic button, and the service reading `OlienPolicy`. `docs/16-account-v2.md`
-   lists the steps and the limits.
+3. **Version 2 is pinned, wired and waiting for its deployment.** Its bytes are in
+   `deployments/v2/creation.json`, its four Monad addresses are in
+   `deployments/10143.json` under `olienV2`, the service serves v2 the moment the code
+   is at those addresses (and v1 only until then), and the console has the move, the
+   transfer policy and the panic. One command puts it on Monad testnet, with the
+   relayer's key as Railway holds it:
+
+   ```sh
+   railway run --service olien-service -- bash ops/deploy-olien.sh --rpc https://testnet-rpc.monad.xyz --book v2 --live
+   ```
+
+   Then restart the service so its boot check finds v2, and
+   `node ops/live-check.mjs <service url>` proves the account it makes is on v2 and
+   that the chain holds a payment to a stranger. A second pair of eyes on
+   `contracts/src/v2/` before real money moves on it.
 4. **None of the service work has been tried by anyone but its author.** It passes its
    own tests, an end-to-end run on a local chain, and the live run on Monad. It has
    not met a real team.

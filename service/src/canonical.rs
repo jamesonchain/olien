@@ -15,9 +15,10 @@ use alloy::primitives::{Address, B256};
 use serde::Deserialize;
 use std::sync::OnceLock;
 
-use crate::olien::{OlienClient, OlienDeployment};
+use crate::olien::{OlienClient, OlienDeployment, OlienV2Deployment};
 
 const BOOK: &str = include_str!("../../deployments/v1/creation.json");
+const BOOK_V2: &str = include_str!("../../deployments/v2/creation.json");
 
 #[derive(Debug, Deserialize)]
 struct Entry {
@@ -47,6 +48,56 @@ struct Book {
 fn book() -> &'static Book {
     static PARSED: OnceLock<Book> = OnceLock::new();
     PARSED.get_or_init(|| serde_json::from_str(BOOK).expect("deployments/v1/creation.json is compiled in and must parse"))
+}
+
+#[derive(Debug, Deserialize)]
+struct ContractsV2 {
+    verifier: Entry,
+    policy: Entry,
+    implementation: Entry,
+    factory: Entry,
+}
+
+#[derive(Debug, Deserialize)]
+struct BookV2 {
+    #[serde(rename = "entryPoint")]
+    entry_point: Address,
+    #[serde(rename = "accountCodeHash")]
+    account_code_hash: B256,
+    contracts: ContractsV2,
+}
+
+fn book_v2() -> &'static BookV2 {
+    static PARSED: OnceLock<BookV2> = OnceLock::new();
+    PARSED.get_or_init(|| serde_json::from_str(BOOK_V2).expect("deployments/v2/creation.json is compiled in and must parse"))
+}
+
+/// The hash of v2's implementation code, which a `setImplementation` naming it must carry.
+pub fn implementation_v2_code_hash() -> B256 {
+    book_v2().contracts.implementation.runtime_code_hash
+}
+
+/// What must be on the chain for a deployment file's `olienV2` to be Olien v2. The
+/// proxy is v1's, so an account on either implementation has the one code hash.
+pub fn expected_v2(deployment: &OlienV2Deployment) -> Result<Vec<(&'static str, Address, B256)>, String> {
+    let canonical = &book_v2().contracts;
+    if book_v2().entry_point != book().entry_point || book_v2().account_code_hash != book().account_code_hash {
+        return Err("the v2 book does not share v1's EntryPoint and proxy; it was not pinned by ops/pin-v2.sh".into());
+    }
+    let pairs = [
+        ("v2 verifier", deployment.verifier, &canonical.verifier),
+        ("policy contract", deployment.policy, &canonical.policy),
+        ("v2 implementation", deployment.implementation, &canonical.implementation),
+        ("v2 factory", deployment.factory, &canonical.factory),
+    ];
+    let mut out = Vec::with_capacity(pairs.len());
+    for (name, given, entry) in pairs {
+        if given != entry.address {
+            return Err(format!("the deployment file names {given:#x} as the {name}; Olien v2's is {:#x}", entry.address));
+        }
+        out.push((name, given, entry.runtime_code_hash));
+    }
+    Ok(out)
 }
 
 /// The code hash of every account the v1 factory makes: one proxy, the same on every
@@ -85,6 +136,39 @@ pub enum Verdict {
     Mismatch(String),
     /// The chain could not be read. Says nothing either way; ask again.
     Unreachable(String),
+}
+
+pub enum VerdictV2 {
+    Verified,
+    /// None of v2's addresses has code: it has not been deployed here. Serve v1 only.
+    NotThere,
+    /// Some code is there and it is not v2's, or only part of v2 is. Do not serve.
+    Mismatch(String),
+    Unreachable(String),
+}
+
+/// Whether the chain carries v2 at the addresses the file names. Nothing at all is a
+/// legitimate answer, since v2 is deployed after the service that knows of it.
+pub async fn verify_v2(client: &OlienClient, deployment: &OlienV2Deployment) -> VerdictV2 {
+    let wanted = match expected_v2(deployment) {
+        Ok(wanted) => wanted,
+        Err(reason) => return VerdictV2::Mismatch(reason),
+    };
+    let empty = alloy::primitives::keccak256([]);
+    let mut present = 0;
+    for (name, address, hash) in &wanted {
+        match client.code_hash(*address).await {
+            Ok(found) if found == *hash => present += 1,
+            Ok(found) if found == empty => {}
+            Ok(found) => return VerdictV2::Mismatch(format!("the code at the {name} {address:#x} hashes to {found:#x}; Olien v2's hashes to {hash:#x}")),
+            Err(error) => return VerdictV2::Unreachable(format!("{error:#}")),
+        }
+    }
+    match present {
+        0 => VerdictV2::NotThere,
+        n if n == wanted.len() => VerdictV2::Verified,
+        n => VerdictV2::Mismatch(format!("{n} of v2's {} contracts are on the chain; a half deployment is not served", wanted.len())),
+    }
 }
 
 pub async fn verify(client: &OlienClient) -> Verdict {
@@ -139,5 +223,25 @@ mod tests {
     #[test]
     fn an_account_has_one_code_hash() {
         assert!(!account_code_hash().is_zero());
+    }
+
+    fn monad_v2() -> OlienV2Deployment {
+        let raw = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../deployments/10143.json")).expect("deployments/10143.json");
+        serde_json::from_str::<Deployment>(&raw).expect("the Monad file parses").olien_v2.expect("with an Olien v2")
+    }
+
+    #[test]
+    fn the_monad_file_names_the_addresses_v2_is_pinned_to() {
+        let wanted = expected_v2(&monad_v2()).expect("the Monad v2 deployment is Olien v2");
+        assert_eq!(wanted.len(), 4);
+        assert!(wanted.iter().all(|(_, _, hash)| !hash.is_zero()));
+        assert_eq!(implementation_v2_code_hash(), wanted[2].2);
+    }
+
+    #[test]
+    fn a_v2_file_naming_another_policy_contract_is_refused() {
+        let mut deployment = monad_v2();
+        deployment.policy = Address::repeat_byte(0x22);
+        assert!(expected_v2(&deployment).unwrap_err().contains("policy contract"));
     }
 }

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Deploys Olien v1 to any chain, from the exact bytes it was first deployed from.
+# Deploys Olien to any chain, from the exact bytes it was first deployed from.
 #
-#   ops/deploy-olien.sh --rpc <url>           simulate: say what would be deployed, send nothing
-#   ops/deploy-olien.sh --rpc <url> --live    broadcast
+#   ops/deploy-olien.sh --rpc <url>                 simulate: say what would be deployed, send nothing
+#   ops/deploy-olien.sh --rpc <url> --live          broadcast
+#   ops/deploy-olien.sh --rpc <url> --book v2       the second implementation (ops/pin-v2.sh writes its book)
 #
 # The four contracts are in deployments/v1/creation.json as creation code, and this
 # sends that code through the deterministic CREATE2 deployer. It does not compile
@@ -14,14 +15,14 @@
 # "not this code".
 #
 # Rerunnable: a piece already on the chain is skipped, so a run that dies halfway is
-# finished by running it again. The deploying key comes from DEPLOY_PK, or RELAYER_PK
-# or ATTESTOR_PK in service/.env, and is never printed. Which key pays does not
-# change where anything lands.
+# finished by running it again. The deploying key comes from DEPLOY_PK or RELAYER_PK in
+# the environment, or RELAYER_PK or ATTESTOR_PK in service/.env, and is never printed.
+# Which key pays does not change where anything lands.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PATH="$HOME/.foundry/bin:$PATH"
-BOOK="$ROOT/deployments/v1/creation.json"
+VERSION="v1"
 
 RPC=""
 LIVE=0
@@ -29,10 +30,13 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --rpc) RPC="${2:-}"; shift 2 ;;
     --live) LIVE=1; shift ;;
+    --book) VERSION="${2:-}"; shift 2 ;;
     *) echo "unknown flag: $1"; exit 1 ;;
   esac
 done
 [ -n "$RPC" ] || { echo "which chain? pass --rpc <url>"; exit 1; }
+BOOK="$ROOT/deployments/$VERSION/creation.json"
+[ -f "$BOOK" ] || { echo "no book at $BOOK"; exit 1; }
 
 CHAIN="$(cast chain-id --rpc-url "$RPC")"
 DEPLOYER="$(jq -r .deployer "$BOOK")"
@@ -46,7 +50,7 @@ has_code "$ENTRY_POINT" || { echo "EntryPoint v0.7 is not at $ENTRY_POINT on thi
 KEY=""
 if [ "$LIVE" -eq 1 ]; then
   key_from_env() { grep -E "^$1=" "$ROOT/service/.env" 2>/dev/null | cut -d= -f2- | tr -d '"'"'"' ' || true; }
-  KEY="${DEPLOY_PK:-}"
+  KEY="${DEPLOY_PK:-${RELAYER_PK:-}}"
   [ -n "$KEY" ] || KEY="$(key_from_env RELAYER_PK)"
   [ -n "$KEY" ] || KEY="$(key_from_env ATTESTOR_PK)"
   [ -n "$KEY" ] || { echo "no deploying key: set DEPLOY_PK, or RELAYER_PK or ATTESTOR_PK in service/.env"; exit 1; }
@@ -83,4 +87,8 @@ if [ "$LIVE" -eq 1 ]; then
 else
   echo "Simulated only; nothing was sent. Add --live to broadcast. The address book entry will be:"
 fi
-jq '{olien: {entryPoint: .entryPoint, factory: .contracts.factory.address, implementation: .contracts.implementation.address, subAccountImplementation: .contracts.subAccountImplementation.address, verifier: .contracts.verifier.address}}' "$BOOK"
+if [ "$VERSION" = "v1" ]; then
+  jq '{olien: {entryPoint: .entryPoint, factory: .contracts.factory.address, implementation: .contracts.implementation.address, subAccountImplementation: .contracts.subAccountImplementation.address, verifier: .contracts.verifier.address}}' "$BOOK"
+else
+  jq '{olienV2: {factory: .contracts.factory.address, implementation: .contracts.implementation.address, policy: .contracts.policy.address, verifier: .contracts.verifier.address}}' "$BOOK"
+fi

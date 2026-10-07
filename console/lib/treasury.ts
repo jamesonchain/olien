@@ -505,6 +505,12 @@ export interface SpendPlan {
 export const planSpend = (address: string, limitId: number, body: { to: string; amount: string; signerId: string }) =>
   request<SpendPlan>(`/accounts/${address}/limits/${limitId}/spend`, post(body));
 
+// A rule change of the account's own: calls to itself, which the signing screen reads
+// from the calldata. The intent is the proposer's words and nothing more.
+export const proposeRuleChange = (address: string, body: { calls: { to: string; value?: string; data: string }[]; intent?: Record<string, unknown> }) =>
+  request<ProposalView>(`/accounts/${address}/proposals`, post({ kind: "rule_change", ...body }));
+export const preparePanicOperation = (address: string, signerId: string) =>
+  request<PreparedOperation>(`/accounts/${address}/panic-operation?signerId=${encodeURIComponent(signerId)}`);
 export const prepareVetoOperation = (address: string, hash: string, signerId: string) =>
   request<PreparedOperation>(`/accounts/${address}/scheduled/${hash}/veto-operation?signerId=${encodeURIComponent(signerId)}`);
 export const submitOperation = (address: string, body: { operation: OperationJson; signerId: string; signature: string }) =>
@@ -597,6 +603,13 @@ export interface ChainInfo {
   entryPoint: string | null;
   factory: string | null;
   implementation: string | null;
+  // v2's contracts (docs/16-account-v2.md), present when the chain carries them. The
+  // code hash is what a move to v2 names; this console hashes the code itself as well.
+  factoryV2?: string | null;
+  implementationV2?: string | null;
+  implementationV2CodeHash?: string | null;
+  policy?: string | null;
+  verifierV2?: string | null;
   // What the service does beyond the first version of its API; absent from an older one.
   features?: string[];
 }

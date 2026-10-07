@@ -362,6 +362,19 @@ pub async fn veto_operation(
     reply(treasury::veto_operation(pool.get_ref(), service.get_ref(), user, &address, &hash, &query.signer_id).await)
 }
 
+/// GET /api/treasury/accounts/{address}/panic-operation?signerId= - a panic as a user
+/// operation for a passkey signer to sign (v2 only).
+pub async fn panic_operation(
+    pool: web::Data<PgPool>,
+    service: web::Data<Treasury>,
+    req: HttpRequest,
+    path: web::Path<String>,
+    query: web::Query<VetoOperationQuery>,
+) -> HttpResponse {
+    let user = who!(pool, req);
+    reply(treasury::panic_operation(pool.get_ref(), service.get_ref(), user, &path, &query.signer_id).await)
+}
+
 /// POST /api/treasury/accounts/{address}/limits/{id}/spend - how the caller's signer
 /// pays from a limit: a call for a wallet, or an operation for a passkey.
 pub async fn spend_plan(
@@ -662,6 +675,7 @@ pub fn routes(scope: actix_web::Scope) -> actix_web::Scope {
         .route("/accounts/{address}/scheduled/{hash}/execute", web::post().to(execute_scheduled))
         .route("/accounts/{address}/scheduled/{hash}/veto-operation", web::get().to(veto_operation))
         .route("/accounts/{address}/operations", web::post().to(submit_operation))
+        .route("/accounts/{address}/panic-operation", web::get().to(panic_operation))
         .route("/accounts/{address}/limits/{id}/spend", web::post().to(spend_plan))
         .route("/accounts/{address}/ledger", web::get().to(ledger))
         .route("/accounts/{address}/address-book", web::get().to(address_book))

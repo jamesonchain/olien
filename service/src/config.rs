@@ -14,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-use crate::olien::OlienDeployment;
+use crate::olien::{OlienDeployment, OlienV2Deployment};
 
 /// The deployment file, read for the parts an Olien service needs.
 ///
@@ -28,6 +28,9 @@ pub struct Deployment {
     pub chain_id: u64,
     #[serde(default)]
     pub olien: Option<OlienDeployment>,
+    /// The second implementation, once it is on this chain (docs/16-account-v2.md).
+    #[serde(default, rename = "olienV2")]
+    pub olien_v2: Option<OlienV2Deployment>,
 }
 
 /// What pays for gas on this chain. On Arc it is USDC itself, 18 decimals in the native
@@ -57,6 +60,8 @@ pub struct Config {
     pub native: NativeToken,
     pub explorer_url: String,
     pub olien: OlienDeployment,
+    /// v2's four contracts, from the same file; served only when their code is there.
+    pub olien_v2: Option<OlienV2Deployment>,
     /// Pays for account creation and executions. Absent means the service reads and
     /// serves but cannot send, which is a legitimate way to run a replica.
     pub relayer_pk: Option<String>,
@@ -193,6 +198,7 @@ impl Config {
             native: native_for(deployment.chain_id),
             explorer_url: explorer_for(deployment.chain_id),
             olien,
+            olien_v2: deployment.olien_v2,
             // RELAYER_PK is the name; ATTESTOR_PK is accepted because the testnet
             // deployment shares one key and inventing a second would be ceremony.
             relayer_pk: optional_env("RELAYER_PK").or_else(|| optional_env("ATTESTOR_PK")),

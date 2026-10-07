@@ -335,6 +335,17 @@ pub struct OlienDeployment {
     pub factory: Address,
 }
 
+/// v2's four contracts from deployments/<chain>.json under `olienV2`: a verifier that
+/// checks every kind of signer, the policy contract every account's limits live in, the
+/// implementation, and a factory that makes accounts on it (docs/16-account-v2.md).
+#[derive(Debug, Clone, Deserialize)]
+pub struct OlienV2Deployment {
+    pub verifier: Address,
+    pub policy: Address,
+    pub implementation: Address,
+    pub factory: Address,
+}
+
 // ---------------------------------------------------------------------------
 // Hashing (spec §4). Computed here rather than through alloy's EIP-712 derive so the
 // bytes are exactly the contract's; the once-per-account self-check against
@@ -777,6 +788,8 @@ pub struct OlienClient {
     witness: Option<DynProvider>,
     relayer: Address,
     pub deployment: OlienDeployment,
+    /// Present only when v2's code is on the chain. New accounts are then made on v2.
+    pub v2: Option<OlienV2Deployment>,
     pub usdc: Address,
     /// EURC where the chain has it. A treasury that converted into euros should be
     /// able to see them, and Convert on the phone means some will.
@@ -791,6 +804,7 @@ impl OlienClient {
         rpc_url: &str,
         private_key: &str,
         deployment: OlienDeployment,
+        v2: Option<OlienV2Deployment>,
         usdc: Address,
         eurc: Option<Address>,
         witness_url: Option<&str>,
@@ -818,6 +832,7 @@ impl OlienClient {
             witness,
             relayer,
             deployment,
+            v2,
             usdc,
             eurc,
             send_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -872,8 +887,19 @@ impl OlienClient {
         Ok(None)
     }
 
+    /// Where new accounts are made: v2's factory when v2 is served, else v1's.
+    pub fn new_account_factory(&self) -> Address {
+        self.v2.as_ref().map(|v| v.factory).unwrap_or(self.deployment.factory)
+    }
+
+    /// Whether an account runs v2, read from its implementation slot.
+    pub async fn is_v2(&self, account: Address) -> Result<bool> {
+        let Some(v2) = &self.v2 else { return Ok(false) };
+        Ok(self.implementation(account).await? == v2.implementation)
+    }
+
     pub async fn predict_address(&self, init: &Init, salt: B256) -> Result<Address> {
-        let factory = IOlienFactory::new(self.deployment.factory, &self.provider);
+        let factory = IOlienFactory::new(self.new_account_factory(), &self.provider);
         factory
             .getAddress(init.clone(), salt)
             .call()
@@ -884,7 +910,7 @@ impl OlienClient {
 
     pub async fn create_account(&self, init: &Init, salt: B256) -> Result<Created> {
         let _guard = self.send_lock.lock().await;
-        let factory = IOlienFactory::new(self.deployment.factory, &self.provider);
+        let factory = IOlienFactory::new(self.new_account_factory(), &self.provider);
         let receipt = retry_nonce(|| async {
             factory.createAccount(init.clone(), salt).send().await.map_err(describe)
         })
@@ -990,6 +1016,22 @@ impl OlienClient {
     }
 
     /// Every token this treasury can hold, so a caller loops rather than naming coins.
+    /// A limit's live budget whichever version the account runs: v1 answers from the
+    /// account, v2 from the policy contract. A v2 account has no `getLimitBudget`, so
+    /// the account is asked first and the policy contract on its refusal.
+    pub async fn limit_budget_any(&self, account: Address, id: u64) -> Result<(u128, u64, u32, u64)> {
+        match self.limit_budget(account, id).await {
+            Ok(budget) => Ok(budget),
+            Err(error) => match &self.v2 {
+                Some(v2) => {
+                    let b = IOlienPolicy::new(v2.policy, &self.provider).budget(account, U256::from(id)).call().await.map_err(describe)?;
+                    Ok((b.remaining, b.refilledAt.to::<u64>(), b.generation, b.epoch))
+                }
+                None => Err(error),
+            },
+        }
+    }
+
     pub fn tokens(&self) -> Vec<Address> {
         match self.eurc {
             Some(eurc) => vec![self.usdc, eurc],
@@ -1211,6 +1253,12 @@ impl OlienClient {
             .from_block(from_block)
             .to_block(to_block);
         logs.extend(self.provider.get_logs(&operations).await.context("reading user operations")?);
+        // A v2 account's limits, policy and known addresses are events of the policy
+        // contract, with the account as their first topic.
+        if let Some(v2) = &self.v2 {
+            let policy = Filter::new().address(v2.policy).topic1(topic).from_block(from_block).to_block(to_block);
+            logs.extend(self.provider.get_logs(&policy).await.context("reading policy logs")?);
+        }
         logs.sort_by_key(|log| (log.block_number.unwrap_or_default(), log.log_index.unwrap_or_default()));
         logs.dedup_by_key(|log| (log.transaction_hash, log.log_index));
         Ok(logs)
@@ -1263,6 +1311,10 @@ pub mod calldata {
     pub fn cancel(hash: B256) -> Bytes {
         IOlien::cancelCall { hash }.abi_encode().into()
     }
+    pub fn panic() -> Bytes {
+        IOlienV2::panicCall {}.abi_encode().into()
+    }
+
     pub fn veto(hash: B256) -> Bytes {
         IOlien::vetoCall { hash }.abi_encode().into()
     }

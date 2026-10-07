@@ -61,9 +61,12 @@ async fn main() -> Result<()> {
     tracing::info!("migrations applied");
 
     treasury::set_chain_tokens(config.usdc, config.eurc);
-    let treasury = build_treasury(&config)?;
+    let mut treasury = build_treasury(&config, true)?;
     if let Some(client) = treasury.client.clone() {
-        hold_to_v1(client).await?;
+        hold_to_v1(client.clone()).await?;
+        if config.olien_v2.is_some() && !hold_v2(&client).await? {
+            treasury = build_treasury(&config, false)?;
+        }
     }
 
     if treasury.client.is_some() {
@@ -144,17 +147,41 @@ async fn hold_to_v1(client: OlienClient) -> Result<()> {
     }
 }
 
+/// Whether v2 is served: its four contracts are on the chain by address and by code.
+/// Not there at all means v1 only, said once; anything else that is not v2 is refused.
+async fn hold_v2(client: &OlienClient) -> Result<bool> {
+    let Some(v2) = client.v2.as_ref() else { return Ok(false) };
+    match canonical::verify_v2(client, v2).await {
+        canonical::VerdictV2::Verified => {
+            tracing::info!("the four contracts of Olien v2 are on this chain, by address and by code: new accounts are made on v2");
+            Ok(true)
+        }
+        canonical::VerdictV2::NotThere => {
+            tracing::warn!("Olien v2 is named in the deployment file and not on this chain yet: serving v1 only until a restart finds it");
+            Ok(false)
+        }
+        canonical::VerdictV2::Mismatch(reason) => anyhow::bail!("refusing to start: {reason}"),
+        canonical::VerdictV2::Unreachable(reason) => {
+            tracing::warn!("v2 could not be checked ({reason}): serving v1 only until a restart can");
+            Ok(false)
+        }
+    }
+}
+
 /// The relayer pays for account creation and for every execution, so without a key this
 /// service reads but cannot write to the chain. The contracts themselves are not
-/// optional: `Config::from_env` has already refused to start without them.
-fn build_treasury(config: &Config) -> Result<Treasury> {
+/// optional: `Config::from_env` has already refused to start without them. v2 is
+/// carried only when `with_v2`, which the boot check decides.
+fn build_treasury(config: &Config, with_v2: bool) -> Result<Treasury> {
     let deployment = &config.olien;
+    let v2 = config.olien_v2.clone().filter(|_| with_v2);
     let client = match &config.relayer_pk {
         Some(pk) => {
             let client = OlienClient::new(
                 &config.rpc_url,
                 pk,
                 deployment.clone(),
+                v2.clone(),
                 config.usdc,
                 config.eurc,
                 config.rpc_url_secondary.as_deref(),
@@ -195,7 +222,12 @@ fn build_treasury(config: &Config) -> Result<Treasury> {
         entry_point: Some(format!("{:#x}", deployment.entry_point)),
         factory: Some(format!("{:#x}", deployment.factory)),
         implementation: Some(format!("{:#x}", deployment.implementation)),
-        features: treasury::FEATURES,
+        factory_v2: v2.as_ref().map(|v| format!("{:#x}", v.factory)),
+        implementation_v2: v2.as_ref().map(|v| format!("{:#x}", v.implementation)),
+        implementation_v2_code_hash: v2.as_ref().map(|_| format!("{:#x}", canonical::implementation_v2_code_hash())),
+        policy: v2.as_ref().map(|v| format!("{:#x}", v.policy)),
+        verifier_v2: v2.as_ref().map(|v| format!("{:#x}", v.verifier)),
+        features: if v2.is_some() { treasury::FEATURES_V2 } else { treasury::FEATURES },
     };
 
     Ok(Treasury {

@@ -16,5 +16,12 @@
     "implementation": "0x8BFf8CCe4edbE882a21197D3942978CCd06fA427",
     "subAccountImplementation": "0xDfc576536187eF72689c514f8c7ea6487960a637",
     "verifier": "0xE196558Ce080229B256dDE6e62CDA2B051B882fC"
+  },
+  "olienV2Note": "The second implementation (docs/16-account-v2.md), pinned in deployments/v2/creation.json and sent by ops/deploy-olien.sh --book v2. The service serves it once the code is at these addresses, and runs v1 only until then.",
+  "olienV2": {
+    "factory": "0xf9Cca12e97E2af0516c554816873fb7c71743F50",
+    "implementation": "0x319D127eA9f2E84cd65b353c41FBd1da3992B98b",
+    "policy": "0x31d8b74ae00E4F186ad4D85905F59CA60C4e3C91",
+    "verifier": "0x2aaeb413EA006f3Be4a3509Ef090d792C75657df"
   }
 }

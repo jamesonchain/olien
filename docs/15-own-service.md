@@ -117,3 +117,13 @@ Set `NEXT_PUBLIC_BACKEND_URL` to the old value and deploy. Nothing on the old si
 touched, so it is exactly as it was left. The one thing to watch is a proposal executed
 through the new service in between: the old service's indexer sees it on the chain and
 catches up, since the chain is the authority for both.
+
+## Version 2 on the same service
+
+The service carries v2's four addresses from `deployments/10143.json` and checks them
+at boot like v1's: all four present with the pinned code means new accounts are made on
+v2 and the console gets the move, the policy and the brake; none present means v1 only,
+said once in the log, until a restart finds them; anything else refuses to start. So the
+order is: send the bytes (`ops/deploy-olien.sh --book v2 --live`, with the relayer's key
+through `railway run`), restart the service, watch the boot line say v2 is served, then
+`ops/live-check.mjs` against the service.

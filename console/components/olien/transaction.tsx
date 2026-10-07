@@ -13,6 +13,7 @@ import {
   cancelProposal,
   confirmProposal,
   deleteProposal,
+  durationLabel,
   errorMessage,
   executeProposal,
   executeScheduled,
@@ -33,7 +34,7 @@ import {
   type ProposalView,
 } from "@/lib/treasury";
 import { AddressChip, Button, CopyButton, Countdown, cx, Disclosure, InlineError, KeyValue, Loading, Note, Panel, plural, proposerLabel, Spinner, StatusPill, Tag, TxChip } from "./ui";
-import { accountError, applyProposal, olienKeys, useBrowserSimulation, useChainAgreement, useNow, useOlienAccount, useProposal, useServiceFeatures, useVerifiedBook, useVetoCall, type VerifiedEntry } from "./use-olien";
+import { accountError, accountVersion, applyProposal, olienKeys, useBrowserPolicyHold, useBrowserSimulation, useChainAgreement, useChainInfo, useNow, useOlienAccount, useProposal, useServiceFeatures, useVerifiedBook, useVetoCall, type VerifiedEntry } from "./use-olien";
 import { ChainAgreementBanner, SoftRules } from "./policy";
 import { friendlyPasskeyError, knownPasskeys, passkeySupported, signWithPasskey } from "@/lib/passkey";
 import { friendlyWalletError, useOlienChain, useWalletSession, walletSigner } from "./wallet";
@@ -97,6 +98,27 @@ function ActionRow({ index, action, note, ctx, book }: { index: number; action: 
 
 // What happens when this browser runs the calls itself. The service's own verdict is
 // mentioned only where it differs, because a difference is the thing worth seeing.
+// Whether the account's own transfer policy will hold this transaction, said by the
+// chain to this browser. A member signing a payment learns here that executing it
+// starts a wait any vetoer can end, before it is a surprise on the queue.
+function PolicyHoldLine({ address, calls }: { address: string; calls: RawCall[] }) {
+  const account = useOlienAccount(address);
+  const info = useChainInfo();
+  const version = accountVersion(account.data, info.data);
+  const hold = useBrowserPolicyHold(address, info.data?.policy, calls, version === "v2");
+  if (version !== "v2" || !hold.data?.waits) return null;
+  return (
+    <div className="olien-rules">
+      <div className="olien-rule">
+        <Lock size={12} />
+        <span>
+          The account&apos;s own transfer policy holds this for {durationLabel(hold.data.delay)} once it is executed, and any member with veto can stop it while it waits. This browser asked the chain.
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function SimulationLine({ address, calls, service }: { address: string; calls: RawCall[]; service: ProposalView["simulation"] }) {
   const simulation = useBrowserSimulation(address, calls, true);
   if (simulation.isLoading) {
@@ -652,6 +674,7 @@ export function OlienTransaction({ address, txHash }: { address: string; txHash:
             {signable ? <SoftRules rules={view.softRules} /> : null}
 
             {signable ? <SimulationLine address={address} calls={fields.calls} service={view.simulation} /> : null}
+            {signable ? <PolicyHoldLine address={address} calls={fields.calls} /> : null}
 
             <KeyValue
               items={[
