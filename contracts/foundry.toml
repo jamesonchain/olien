@@ -19,8 +19,16 @@ fs_permissions = [
 
 # The account is compiled through the IR pipeline: it is the one contract that needs the
 # size and the stack room. Everything else stays on the legacy pipeline it was tested on.
-additional_compiler_profiles = [{ name = "olien", via_ir = true, optimizer_runs = 1 }]
-compilation_restrictions = [{ paths = "src/**", via_ir = true }]
+additional_compiler_profiles = [
+    { name = "olien", via_ir = true, optimizer_runs = 1 },
+    # v2 carries no metadata hash, so its addresses depend on its code alone and not on
+    # where the source files sat when it was built (docs/14, L11).
+    { name = "v2", via_ir = true, optimizer_runs = 1, bytecode_hash = "None" },
+]
+compilation_restrictions = [
+    { paths = "src/**", via_ir = true },
+    { paths = "src/v2/**", bytecode_hash = "None" },
+]
 
 # 32k calls per invariant. Below the defaults so the suite stays usable during
 # development; the handler swallows reverts, so afterInvariant asserts the run

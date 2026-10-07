@@ -24,7 +24,7 @@ contract OlienPoliciesTest is OlienTestBase {
     uint256 newDeviceX;
     uint256 newDeviceY;
 
-    function setUp() public override {
+    function setUp() public virtual override {
         super.setUp();
         (newDeviceX, newDeviceY) = vm.publicKeyP256(newDevicePk);
     }
@@ -242,7 +242,7 @@ contract OlienPoliciesTest is OlienTestBase {
 
     // ---------------------------------------------------------------- recovery
 
-    function test_guardianAloneWaitsAndCanBeVetoed() public {
+    function test_guardianAloneWaitsAndCanBeVetoed() public virtual {
         Olien account = consumerAccount();
         Call[] memory calls = one(replaceDeviceCall(account));
         Transaction memory t = txn(calls);
@@ -359,7 +359,7 @@ contract OlienPoliciesTest is OlienTestBase {
         runAliceBob(account, calls);
     }
 
-    function test_spendUnderALimit() public {
+    function test_spendUnderALimit() public virtual {
         Olien account = limitedAccount();
         assertTrue(account.isLimitSigner(1, idOf(carol)));
         assertTrue(account.isLimitDestination(1, dave));
@@ -393,7 +393,7 @@ contract OlienPoliciesTest is OlienTestBase {
         assertEq(resetAt, block.timestamp - 5 + 1 days);
     }
 
-    function test_replacingALimitRetiresItsSigners() public {
+    function test_replacingALimitRetiresItsSigners() public virtual {
         Olien account = limitedAccount();
         runAliceBob(account, selfCall(account, abi.encodeCall(Olien.setSpendingLimit, (1, SpendingLimitInput(address(usdc), 0, 5e6, 0, true)))));
         assertFalse(account.isLimitSigner(1, idOf(carol)));
@@ -412,7 +412,7 @@ contract OlienPoliciesTest is OlienTestBase {
         account.spend(1, eve, 1e6);
     }
 
-    function test_aReAddedKeyIsNotTheLimitsSigner() public {
+    function test_aReAddedKeyIsNotTheLimitsSigner() public virtual {
         Olien account = limitedAccount();
         Call[] memory calls = new Call[](2);
         calls[0] = selfCall(account, abi.encodeCall(Olien.removeSigner, (idOf(carol))));
@@ -424,7 +424,7 @@ contract OlienPoliciesTest is OlienTestBase {
         account.spend(1, dave, 1e6);
     }
 
-    function test_removedLimitSpendsNothing() public {
+    function test_removedLimitSpendsNothing() public virtual {
         Olien account = limitedAccount();
         runAliceBob(account, selfCall(account, abi.encodeCall(Olien.removeSpendingLimit, (1))));
         vm.prank(carol);

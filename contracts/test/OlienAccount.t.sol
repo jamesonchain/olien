@@ -364,7 +364,7 @@ contract OlienAccountTest is OlienTestBase {
 
     // --------------------------------------------------------------- EIP-1271
 
-    function test_isValidSignature() public {
+    function test_isValidSignature() public virtual {
         Olien account = plainAccount();
         bytes32 digest = keccak256("a cheque");
         bytes32 wrapped = account.getMessageHash(digest);
@@ -427,7 +427,7 @@ contract OlienAccountTest is OlienTestBase {
 
     // ---------------------------------------------------------------- upgrade
 
-    function test_implementationChangeAndFreeze() public {
+    function test_implementationChangeAndFreeze() public virtual {
         Olien account = plainAccount();
         Olien next = new Olien(ENTRY_POINT, address(verifier), address(subImpl));
 

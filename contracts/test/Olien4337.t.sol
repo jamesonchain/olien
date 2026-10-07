@@ -120,7 +120,7 @@ contract Olien4337Test is OlienTestBase {
         IEntryPoint(ENTRY_POINT).handleOps(ops, payable(bundler));
     }
 
-    function test_singleSignerSpendAsUserOperation() public {
+    function test_singleSignerSpendAsUserOperation() public virtual {
         Olien account = deploy(
             initOf(three(ecdsa(alice, PERM_APPROVE), ecdsa(bob, PERM_APPROVE), p256(deviceX, deviceY, 0)), 2, 0), "payroll"
         );
