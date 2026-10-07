@@ -732,10 +732,17 @@ the console and `ops/watch-scheduled.mjs` read without the service. The account 
 bytes under the size limit, so limits, the policy and the known list moved to
 `OlienPolicy` and every signature check and hash to `OlienVerifierV2`, both trusted as
 the v1 verifier was. v1's suites pass against v2 unchanged but for six tests that assert
-what v2 changed on purpose; 169 contract tests in all. Not yet: the v2 deployment and
-its pinned bytes, the console's policy screen and panic button, and the service reading
-OlienPolicy. L9 turned out to be closed already: v1's constructor sets the
-implementation's epoch to its maximum, so nothing can initialise it.
+what v2 changed on purpose; 169 contract tests in all. The same day: the bytes pinned
+(`deployments/v2/`), the four Monad addresses named, the service serving v2 only when
+its boot check finds the code and v1 until then, the console's version, policy and
+brake screens, and `ops/live-check.mjs` proving a v2 account once the service carries
+it. Not yet: the deployment itself, and a review before real money. L9 turned out to
+be closed already: v1's constructor sets the implementation's epoch to its maximum, so
+nothing can initialise it. One thing the day taught, worth more than its size: the
+first v2 book pinned the hash of empty code four times, because a dry run of the
+constructors had answered nothing, and the service's boot check then declared v2
+present on a chain with no v2, since an undeployed address hashes to exactly that. A
+check that compares hashes has to refuse the hash of nothing on both sides.
 
 ## Sources
 

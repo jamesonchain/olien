@@ -114,8 +114,12 @@ replace a lost colleague's key after a long silence, a vetoed guardian is suspen
 upgrade names the hash of its code, spending limits refill by the hour, a synced
 passkey is recorded as one, and what is scheduled can be read in one call. v1's test
 suites run against v2 as they are, apart from six tests that assert what v2 changed on
-purpose. It is built and tested and not deployed, and no account has moved to it. The
-console and the service can read its calls; the screens that use it are not written.
+purpose. Its bytes are pinned and its addresses known, the service serves it the
+moment the code is at them, and the console has its screens: which version an account
+runs and the move, the transfer policy with the known-address list, the brake by wallet
+or passkey, a line on the signing page saying when the chain will hold a payment, and
+a check that names a scheduled change the service does not show. What is left is the
+deployment itself, one command under "What needs a person".
 
 `ops/watch-scheduled.mjs` watches accounts for scheduled changes with nothing but an
 RPC, and says what each one does in the words the signing screen would use. It is the
