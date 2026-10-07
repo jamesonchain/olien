@@ -93,13 +93,22 @@ The console was pointed at it the same day: `NEXT_PUBLIC_BACKEND_URL` on the Ver
 project, then a production deploy, checked by reading the served scripts for the old
 address (none) and the new one. olien.org talks to this service now.
 
+The relayer was funded with 5 MON the same day, and the service was then put through a
+whole account's life on Monad testnet with keys made for the run: an account created
+through the relayer, its code checked against `deployments/v1`, a policy set, an address
+signed into the book, a key minted with a last day, a rule change proposed, approved
+twice with the console's own hashing, executed and scheduled by the chain, the audit
+trail read back intact, and the account reopened by a signer and refused to a stranger.
+Thirteen checks, all passed, and `ops/live-check.mjs` repeats the run against any
+service URL. The first account is `0xd82d081799d3897df0e680e8e61b77d6c72ec165` and a run
+costs the relayer 0.053 MON, so one MON pays for roughly twenty such lives.
+
+The health line says `low` under 5 MON, which the run dipped the relayer just under. It
+is a note on the health line and nothing else reads it; another MON clears it.
+
 Still to do:
 
-1. **Fund the relayer** above with MON on Monad testnet. Until then the service reads,
-   imports and serves, and cannot create an account or execute anything. The old
-   relayer still holds about 4 MON; three of them can be moved across with the old key
-   as Railway holds it, without the key ever being shown.
-2. **Reopen each Olien** from the start page by address, giving the block it was
+1. **Reopen each Olien** from the start page by address, giving the block it was
    created in if its ledger should reach back that far.
 
 ## Going back

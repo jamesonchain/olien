@@ -71,20 +71,22 @@ list at first. They were found by building, not by reading.
   screens also say what a zero delay, a fixed spending window and a synced passkey
   really mean, and a new account lets any one member veto a rule change.
 
-### In the repository, not live yet
+### Live since 7 October 2026, on this repository's own service
 
-The console on olien.org does not talk to `service/` in this repository. It talks to
-`olien-monad-testnet-production.up.railway.app`, which is built from a different
-repository, and the service here has never been deployed. So everything below is done
-and tested and reaches nobody until that changes. The console already carries the
-screens for all of it and shows each one only when the service it is talking to says
-it can do it, so they appear by themselves on the day of the move.
+Until 7 October the console on olien.org talked to a service built from a different
+repository, and the service here had never been deployed. It now runs in a Railway
+project of its own, with its own database and its own relayer, and olien.org talks
+to it. `docs/15-own-service.md` is the runbook for the move and for going back. On the
+day it went live it was put through a whole account's life on Monad testnet with keys
+made for the run, thirteen checks, every one passed; `ops/live-check.mjs` repeats that
+run against any service URL. The console shows each screen below only when the service
+it is talking to says it can do it.
 
 - The service refuses a proposal whose description contradicts its calls.
 - It refuses to start unless the contracts it is pointed at are Olien v1.
 - A signer can open an Olien by its address, and the service rebuilds it from the chain.
 - API keys expire, ninety days out unless you choose otherwise.
-- A `Dockerfile` at the root builds the service. The image has not been built yet.
+- A `Dockerfile` at the root builds the service, and Railway builds it from there.
 - **A treasury policy.** A payment above an amount needs more approvals than the
   threshold, a payment to an address nobody vouched for waits, a newly added address
   waits a set time, and nothing runs outside set hours. Tightening it is immediate;
@@ -123,19 +125,20 @@ it can do it, so they appear by themselves on the day of the move.
 
 ### What needs a person
 
-1. **Whether to move olien.org onto this repository's service.**
-   `docs/15-own-service.md` has what is ready, what it costs, and how to go back. It
-   starts from an empty database: accounts are reopened by address, and names, labels
-   and proposals still collecting signatures do not carry over.
-2. **The relayer is low on MON.** `0xD6c574461d96Ee708f58Fe553049aD4f48BB983A` pays for
-   executions on Monad testnet and is under the level the service calls low.
+1. **Reopen your Olien.** The move started from an empty database, so each account is
+   opened again from the start page by its address. Names, labels and proposals still
+   collecting signatures did not carry over; the chain's own state did.
+2. **The relayer.** `0x3f6CacC63449952Fc8b519B781b21ceBc8f13BcB` pays for creations and
+   executions on Monad testnet and holds just under 5 MON, which is where the health
+   line starts saying low. A whole account life costs it about 0.05.
 3. **What is still open from the audit** is on the chain, and is a second version of
    the account: a delay on large or unfamiliar payments that the account itself
    enforces, a way for one member to stop everything in flight, a sliding window for
    spending limits, and a recovery path for an account whose keys are lost. The
    policy above is the blueprint for the first of those. `docs/14` has the list.
 4. **None of the service work has been tried by anyone but its author.** It passes its
-   own tests and an end-to-end run on a local chain. It has not met a real team.
+   own tests, an end-to-end run on a local chain, and the live run on Monad. It has
+   not met a real team.
 
 ## Getting it
 
@@ -242,6 +245,15 @@ and stops if the pinned bytes no longer predict their recorded addresses.
 ```sh
 ops/deploy-olien.sh --rpc <url>           # say what would be deployed
 ops/deploy-olien.sh --rpc <url> --live    # send it
+```
+
+**Checking a running service** by living a whole account through it with keys made for
+the run: creation, policy, a signed book entry, a key, a rule change approved with the
+console's own hashing and scheduled by the chain, the audit trail, and reopening. It
+spends about 0.05 of the gas token from the service's relayer.
+
+```sh
+node ops/live-check.mjs https://olien-service-production.up.railway.app
 ```
 
 ## Notes
