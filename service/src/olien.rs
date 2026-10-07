@@ -809,8 +809,16 @@ impl OlienClient {
         eurc: Option<Address>,
         witness_url: Option<&str>,
     ) -> Result<Self> {
+        // Read only, and with no fillers: a filler puts a gas field on every eth_call,
+        // and a public endpoint with a lower cap refuses the call outright, which made
+        // the witness unreadable and the second opinion silent.
         let witness = match witness_url {
-            Some(url) => Some(ProviderBuilder::new().connect_http(url.parse().context("parsing RPC_URL_SECONDARY")?).erased()),
+            Some(url) => Some(
+                ProviderBuilder::new()
+                    .disable_recommended_fillers()
+                    .connect_http(url.parse().context("parsing RPC_URL_SECONDARY")?)
+                    .erased(),
+            ),
             None => None,
         };
         let signer: PrivateKeySigner = private_key.trim().parse().context("parsing the relayer key")?;
