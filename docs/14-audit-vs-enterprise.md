@@ -722,6 +722,21 @@ database, since the signature that made it is still valid; only an on-chain list
 ends that. And a service that hides a scheduled change is still not caught by the
 console. Each of these is a line in phase 4.
 
+**Phase 4 built, 2026-10-07.** The second implementation of the account is in
+`contracts/src/v2/` and described in `16-account-v2.md`: C1's transfer policy inside
+the account (a tier, known addresses, a wait any vetoer can stop, learning by waiting,
+tightening at once and loosening slowly, a lock date), H2's `panic()`, C2's inactivity
+path, H3's continuously refilling limits, L7's code hash on `setImplementation`, L8's
+suspension of a vetoed guardian, M6's synced flag recorded on chain, and a scheduled log
+the console and `ops/watch-scheduled.mjs` read without the service. The account was 31
+bytes under the size limit, so limits, the policy and the known list moved to
+`OlienPolicy` and every signature check and hash to `OlienVerifierV2`, both trusted as
+the v1 verifier was. v1's suites pass against v2 unchanged but for six tests that assert
+what v2 changed on purpose; 169 contract tests in all. Not yet: the v2 deployment and
+its pinned bytes, the console's policy screen and panic button, and the service reading
+OlienPolicy. L9 turned out to be closed already: v1's constructor sets the
+implementation's epoch to its maximum, so nothing can initialise it.
+
 ## Sources
 
 Vendor documentation and APIs, fetched 2026-09-29. Marketing pages are marked.

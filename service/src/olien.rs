@@ -220,6 +220,61 @@ sol! {
         function getAddress(Init init, bytes32 salt) external view returns (address);
     }
 
+    /// The transfer policy of docs/16-account-v2.md, as the account takes it.
+    #[derive(Debug)]
+    struct Policy {
+        address token;
+        uint128 tier;
+        uint48 delay;
+        bool requireKnown;
+        bool learn;
+        uint48 lockedUntil;
+    }
+
+    /// What v2 added to the account (docs/16). v1's selectors stay in IOlien above and
+    /// a v1 account answers only those; a v2 account answers both sets but these two.
+    #[derive(Debug)]
+    #[sol(rpc)]
+    interface IOlienV2 {
+        event Panicked(bytes32 indexed signerId, uint64 epoch);
+        event DelaysChanged(uint48 configDelay, uint48 recoveryDelay, uint48 recoveryCoSignDelay, uint48 inactivityDelay);
+        event SignerSuspended(bytes32 indexed id);
+
+        error Cooldown(uint48 until);
+        error CodeMismatch(address implementation);
+
+        function setDelays(uint48 configDelay, uint48 recoveryDelay, uint48 recoveryCoSignDelay, uint48 inactivityDelay) external;
+        function setImplementation(address newImplementation, bytes32 codeHash) external;
+        function setTransferPolicy(Policy p) external;
+        function setKnown(address[] list, bool known) external;
+        function panic() external;
+        function getState() external view returns (uint48 inactivityDelay, uint48 lastActivity, bool policyOn);
+        function getScheduledLog(uint256 from, uint256 limit) external view returns (bytes32[]);
+        function POLICY() external view returns (address);
+        function OLIEN_VERSION() external view returns (string);
+    }
+
+    /// Every account's limits, policy and known addresses, keyed by the account.
+    #[derive(Debug)]
+    #[sol(rpc)]
+    interface IOlienPolicy {
+        event SpendingLimitSet(address indexed account, uint256 indexed id, uint32 generation, address token, address from, uint128 amount, uint48 period, bool anyDestination);
+        event LimitSignerAllowed(address indexed account, uint256 indexed id, uint32 generation, bytes32 signerId);
+        event LimitDestinationAllowed(address indexed account, uint256 indexed id, uint32 generation, address to);
+        event SpendingLimitRemoved(address indexed account, uint256 indexed id);
+        event TransferPolicySet(address indexed account, address token, uint128 tier, uint48 delay, bool requireKnown, bool learn, uint48 lockedUntil);
+        event DestinationKnown(address indexed account, address indexed to, uint48 since);
+        event DestinationForgotten(address indexed account, address indexed to);
+
+        error PolicyLocked(uint48 until);
+
+        function policyOf(address account) external view returns (Policy);
+        function knownSince(address account, address to) external view returns (uint48);
+        function budget(address account, uint256 id) external view returns (uint128 remaining, uint48 refilledAt, uint32 generation, uint64 epoch);
+        function isSigner(address account, uint256 id, bytes32 signerId) external view returns (bool);
+        function isDestination(address account, uint256 id, address to) external view returns (bool);
+    }
+
     #[sol(rpc)]
     interface IERC20 {
         event Transfer(address indexed from, address indexed to, uint256 value);
@@ -631,6 +686,13 @@ pub fn account_selector(selector: [u8; 4]) -> Option<SelectorInfo> {
         s if s == IOlien::freezeImplementationCall::SELECTOR => config("freezeImplementation"),
         s if s == IOlien::removeSpendingLimitCall::SELECTOR => immediate("removeSpendingLimit"),
         s if s == IOlien::cancelCall::SELECTOR => immediate("cancel"),
+        // v2 (docs/16). Whether a policy change or a new known address waits depends on the
+        // policy in force, which only the chain knows; "config" is the slow answer, so the
+        // prediction errs toward a wait that may not happen rather than the reverse.
+        s if s == IOlienV2::setDelaysCall::SELECTOR => config("setDelays"),
+        s if s == IOlienV2::setImplementationCall::SELECTOR => config("setImplementation"),
+        s if s == IOlienV2::setTransferPolicyCall::SELECTOR => config("setTransferPolicy"),
+        s if s == IOlienV2::setKnownCall::SELECTOR => config("setKnown"),
         _ => None,
     }
 }

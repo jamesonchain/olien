@@ -775,3 +775,11 @@ The first draft was reviewed adversarially on 2026-09-04 before implementation
   escalation the review described); signed meta-actions with their own EIP-712
   structs (code size; user operations cover the case); `clearExpired` for lapsed
   schedules (harmless storage).
+
+## 20. Version 2
+
+A second implementation exists, `contracts/src/v2/OlienV2.sol`, and `16-account-v2.md`
+is the difference: everything above still holds, and what v2 adds is listed there with
+its own invariants, numbered on from §15. The hashes of §4, the signatures of §5, the
+paths of §6 and the storage of §3 are unchanged, which is what lets a v1 account adopt
+v2 through §7.7 and keep its signers, its rules and its epoch.

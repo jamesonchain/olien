@@ -113,29 +113,37 @@ export type Action =
 const ERC20_ABI = parseAbi(["function transfer(address to, uint256 amount) returns (bool)", "function approve(address spender, uint256 amount) returns (bool)"]);
 
 // The calls an account accepts to itself on the threshold path: the configuration
-// functions, cancel and removeSpendingLimit (spec §6.2). `veto` and `spend` are here for
-// the single-signer operations, and are refused as part of a transaction below.
+// functions, cancel and removeSpendingLimit (spec §6.2), and v2's additions (docs/16).
+// `veto`, `spend` and `panic` are here for the single-signer operations, and are refused
+// as part of a transaction below. Where v2 changed a signature the old one stays, since
+// v1 accounts keep using it.
 export const OLIEN_ABI = parseAbi([
   "struct SignerInput { uint8 kind; uint8 permissions; uint8 flags; bytes key; }",
   "struct SpendingLimitInput { address token; uint256 subAccount; uint128 amount; uint48 period; bool anyDestination; }",
+  "struct Policy { address token; uint128 tier; uint48 delay; bool requireKnown; bool learn; uint48 lockedUntil; }",
   "function addSigner(SignerInput input)",
   "function removeSigner(bytes32 id)",
   "function replaceSigner(bytes32 oldId, SignerInput input)",
   "function setThreshold(uint16 newThreshold)",
   "function setVetoThreshold(uint16 newVetoThreshold)",
   "function setDelays(uint48 configDelay, uint48 recoveryDelay, uint48 recoveryCoSignDelay)",
+  "function setDelays(uint48 configDelay, uint48 recoveryDelay, uint48 recoveryCoSignDelay, uint48 inactivityDelay)",
   "function setSpendingLimit(uint256 id, SpendingLimitInput input) returns (uint256)",
   "function allowLimitSigner(uint256 id, bytes32 signerId)",
   "function allowLimitDestination(uint256 id, address to)",
   "function removeSpendingLimit(uint256 id)",
   "function cancel(bytes32 hash)",
   "function setImplementation(address newImplementation)",
+  "function setImplementation(address newImplementation, bytes32 codeHash)",
   "function freezeImplementation()",
+  "function setTransferPolicy(Policy p)",
+  "function setKnown(address[] list, bool known)",
   "function veto(bytes32 hash)",
   "function spend(uint256 id, address to, uint256 amount)",
+  "function panic()",
 ]);
 
-const OPERATION_ONLY = new Set(["veto", "spend"]);
+const OPERATION_ONLY = new Set(["veto", "spend", "panic"]);
 const MAX_UINT256 = (1n << 256n) - 1n;
 
 export function formatAmount(amount: bigint, decimals: number): string {
@@ -203,8 +211,10 @@ function describeRule(name: string, args: RuleArgs, ctx: DecodeContext): { text:
       return { text: Number(args[0]) === 0 ? "Set the veto threshold to automatic" : `Set the veto threshold to ${args[0]}`, danger: false };
     case "setDelays": {
       const config = args[0] as number;
+      const inactivity = args.length > 3 ? Number(args[3]) : null;
+      const silence = inactivity === null ? "" : inactivity === 0 ? ", no recovery after silence" : `, one member may recover a key after ${duration(inactivity)} of silence`;
       return {
-        text: `Set delays: rule changes ${duration(config)}, recovery ${duration(args[1] as number)}, co-signed recovery ${duration(args[2] as number)}`,
+        text: `Set delays: rule changes ${duration(config)}, recovery ${duration(args[1] as number)}, co-signed recovery ${duration(args[2] as number)}${silence}`,
         danger: Number(config) === 0,
       };
     }
@@ -227,10 +237,29 @@ function describeRule(name: string, args: RuleArgs, ctx: DecodeContext): { text:
       return { text: `Remove spending limit ${args[0]}`, danger: false };
     case "cancel":
       return { text: `Cancel the proposal ${args[0]}`, danger: false };
-    case "setImplementation":
-      return { text: `Replace the code that runs this account with the contract at ${getAddress(args[0] as Hex)}`, danger: true };
+    case "setImplementation": {
+      const named = args.length > 1 ? `, whose code hashes to ${shortId(args[1] as string)}` : "";
+      return { text: `Replace the code that runs this account with the contract at ${getAddress(args[0] as Hex)}${named}`, danger: true };
+    }
     case "freezeImplementation":
       return { text: "Freeze this account's code forever", danger: true };
+    case "setTransferPolicy": {
+      const p = args[0] as { token: Hex; tier: bigint; delay: number; requireKnown: boolean; learn: boolean; lockedUntil: number };
+      if (p.tier === 0n && !p.requireKnown) return { text: "Clear the transfer policy: nothing waits", danger: true };
+      const token = tokenName(p.token, ctx);
+      const tier = p.tier === 0n ? null : token ? `${formatAmount(p.tier, token.decimals)} ${token.symbol}` : `${p.tier} units of the token at ${getAddress(p.token)}`;
+      const parts = [
+        tier ? `payments over ${tier} wait ${duration(p.delay)}` : null,
+        p.requireKnown ? `payments to addresses this account does not know wait ${duration(p.delay)}` : null,
+        p.learn ? "an address paid after a wait becomes known" : null,
+        Number(p.lockedUntil) > 0 ? `loosening is refused until ${new Date(Number(p.lockedUntil) * 1000).toISOString().slice(0, 10)}` : null,
+      ].filter(Boolean);
+      return { text: `Set the transfer policy: ${parts.join("; ")}`, danger: false };
+    }
+    case "setKnown": {
+      const list = (args[0] as Hex[]).map((address) => getAddress(address));
+      return { text: `${args[1] ? "Know" : "Forget"} ${list.length === 1 ? "the address" : `${list.length} addresses`} ${list.join(", ")}`, danger: false };
+    }
     default:
       return { text: name, danger: false };
   }

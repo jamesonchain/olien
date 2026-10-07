@@ -33,14 +33,14 @@ chains and hashed to confirm it: identical.
 
 | Path | What it is |
 | --- | --- |
-| `contracts/` | The account: the verifier, the sub-account, the account and its factory |
+| `contracts/` | The account: the verifier, the sub-account, the account and its factory; `src/v2/` is the second implementation |
 | `service/` | The transaction service and the chain indexer |
 | `console/` | The web console, one deployment per chain |
 | `docs/` | The research and the design, including the account specification |
 | `deployments/` | One address book per chain, named by chain id, and `v1/creation.json`, the exact bytes v1 deploys from |
-| `ops/` | Chain readiness checks, the deploy script, a local chain, and a hash verifier that needs no console |
+| `ops/` | Chain readiness checks, the deploy script, a local chain, a hash verifier that needs no console, a live check of a running service, and a watcher for scheduled changes |
 
-## What changed, 30 September to 4 October 2026
+## What changed, 30 September to 7 October 2026
 
 A lot landed in one push. If you were not there for it, this is what moved, what is live,
 and what now needs a decision. The long version, with the evidence for every point, is
@@ -104,6 +104,23 @@ it is talking to says it can do it.
   also asks the chain itself and stops signing if the service's picture of the
   account differs.
 
+### The account, version 2, built 7 October
+
+`contracts/src/v2/` and `docs/16-account-v2.md`. Everything the audit left on the chain
+is in it: a payment above a tier or to an address the account does not know waits and
+any vetoer can stop it, tightening a rule is immediate and loosening it is slow and can
+be locked, one vetoer can stop everything in flight with `panic()`, one member can
+replace a lost colleague's key after a long silence, a vetoed guardian is suspended, an
+upgrade names the hash of its code, spending limits refill by the hour, a synced
+passkey is recorded as one, and what is scheduled can be read in one call. v1's test
+suites run against v2 as they are, apart from six tests that assert what v2 changed on
+purpose. It is built and tested and not deployed, and no account has moved to it. The
+console and the service can read its calls; the screens that use it are not written.
+
+`ops/watch-scheduled.mjs` watches accounts for scheduled changes with nothing but an
+RPC, and says what each one does in the words the signing screen would use. It is the
+second pair of eyes the audit asked for on a service that could hide a change.
+
 ### Changed for anyone working here
 
 - **Never deploy the contracts with `forge script`.** Use `ops/deploy-olien.sh`. The
@@ -131,11 +148,12 @@ it is talking to says it can do it.
 2. **The relayer.** `0x3f6CacC63449952Fc8b519B781b21ceBc8f13BcB` pays for creations and
    executions on Monad testnet and holds just under 5 MON, which is where the health
    line starts saying low. A whole account life costs it about 0.05.
-3. **What is still open from the audit** is on the chain, and is a second version of
-   the account: a delay on large or unfamiliar payments that the account itself
-   enforces, a way for one member to stop everything in flight, a sliding window for
-   spending limits, and a recovery path for an account whose keys are lost. The
-   policy above is the blueprint for the first of those. `docs/14` has the list.
+3. **Version 2 needs a review, a deployment and its screens.** The contracts are
+   written and tested. Before any account moves: a second pair of eyes on
+   `contracts/src/v2/`, pinned bytes in `deployments/v2/` the way v1's are pinned,
+   the deploy script taught the second set, a console screen for the transfer policy
+   and a panic button, and the service reading `OlienPolicy`. `docs/16-account-v2.md`
+   lists the steps and the limits.
 4. **None of the service work has been tried by anyone but its author.** It passes its
    own tests, an end-to-end run on a local chain, and the live run on Monad. It has
    not met a real team.
@@ -153,7 +171,8 @@ Already cloned without them: `git submodule update --init --recursive`.
 
 ## Running it
 
-**Contracts.** 65 tests, no network needed. Three of them hold the deployed bytes to
+**Contracts.** 169 tests, no network needed: v1's, the same run against v2, and
+v2's own. Three of them hold the deployed bytes to
 this source: a change that alters the account's code fails there, because that is a new
 version with new addresses and not an edit.
 
@@ -256,6 +275,14 @@ spends about 0.05 of the gas token from the service's relayer.
 node ops/live-check.mjs https://olien-service-production.up.railway.app
 ```
 
+**Watching an account** for scheduled changes without the service, printing what each
+one does and when it can run, and later whether it ran or was stopped. Any number of
+accounts; a webhook if something should be told.
+
+```sh
+node ops/watch-scheduled.mjs --rpc https://testnet-rpc.monad.xyz --chain-id 10143 --account 0x...
+```
+
 ## Notes
 
 Gas on Monad is MON, not the stablecoin. `eth_getLogs` is capped at 100 blocks on every
@@ -266,8 +293,9 @@ A passkey is bound to the domain that created it and cannot be moved to another 
 `NEXT_PUBLIC_PASSKEY_RP_ID` exists so that binding is a deployment decision rather than
 an accident of which URL someone happened to open.
 
-`docs/15-own-service.md` is how the console on olien.org moves onto the service in this
-repository, which as of 2026-10-04 it is not on.
+`docs/15-own-service.md` is how the console on olien.org moved onto the service in this
+repository, which it did on 2026-10-07. `docs/16-account-v2.md` is the second
+implementation of the account: built, tested, not deployed.
 
 `docs/10-account-spec.md` is the contract, normatively. `docs/12-metropolis.md` records
 what has been proved on chain, with transaction hashes.

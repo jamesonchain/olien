@@ -37,6 +37,38 @@ const ctx: DecodeContext = { account: ACCOUNT, tokens: [{ address: USDC, symbol:
 const TRANSFER = "0xa9059cbb000000000000000000000000d6c574461d96ee708f58fe553049ad4f48bb983a00000000000000000000000000000000000000000000000000000000000f4240";
 const PAYEE = "0xD6c574461d96Ee708f58Fe553049aD4f48BB983A";
 
+test("v2's rules read as rules, with the old shapes still read", () => {
+  const rule = (data: Hex) => {
+    const action = decodeCall({ to: ACCOUNT, value: "0", data }, ctx);
+    assert.equal(action.type, "rule");
+    return describeAction(action, ctx);
+  };
+  const policy = { token: USDC as Hex, tier: 25_000_000_000n, delay: 86_400, requireKnown: true, learn: true, lockedUntil: 1_800_000_000 };
+  assert.equal(
+    rule(encodeFunctionData({ abi: OLIEN_ABI, functionName: "setTransferPolicy", args: [policy] })),
+    "Set the transfer policy: payments over 25,000.00 USDC wait 1 day; payments to addresses this account does not know wait 1 day; an address paid after a wait becomes known; loosening is refused until 2027-01-15",
+  );
+  assert.equal(
+    rule(encodeFunctionData({ abi: OLIEN_ABI, functionName: "setTransferPolicy", args: [{ ...policy, tier: 0n, requireKnown: false }] })),
+    "Clear the transfer policy: nothing waits",
+  );
+  assert.equal(rule(encodeFunctionData({ abi: OLIEN_ABI, functionName: "setKnown", args: [[PAYEE], true] })), `Know the address ${PAYEE}`);
+  assert.equal(rule(encodeFunctionData({ abi: OLIEN_ABI, functionName: "setKnown", args: [[PAYEE, USDC], false] })), `Forget 2 addresses ${PAYEE}, ${USDC}`);
+  assert.equal(
+    rule(encodeFunctionData({ abi: OLIEN_ABI, functionName: "setDelays", args: [86_400, 86_400, 0, 90 * 86_400] })),
+    "Set delays: rule changes 1 day, recovery 1 day, co-signed recovery no delay, one member may recover a key after 90 days of silence",
+  );
+  assert.equal(
+    rule(encodeFunctionData({ abi: OLIEN_ABI, functionName: "setDelays", args: [86_400, 86_400, 0] })),
+    "Set delays: rule changes 1 day, recovery 1 day, co-signed recovery no delay",
+  );
+  const hash = `0x${"ab".repeat(32)}` as Hex;
+  assert.match(rule(encodeFunctionData({ abi: OLIEN_ABI, functionName: "setImplementation", args: [PAYEE, hash] })), /whose code hashes to 0xababab/);
+  assert.doesNotMatch(rule(encodeFunctionData({ abi: OLIEN_ABI, functionName: "setImplementation", args: [PAYEE] })), /hashes to/);
+  // Panic is a single-signer act, never part of a transaction.
+  assert.equal(decodeCall({ to: ACCOUNT, value: "0", data: encodeFunctionData({ abi: OLIEN_ABI, functionName: "panic" }) }, ctx).type, "unreadable");
+});
+
 test("a transaction hashes as the account hashes it", () => {
   const fields = { nonce: 7n << 64n, epoch: 1, calls: [{ to: PROOF, value: 1, data: "0x0102" }], validAfter: 1, validUntil: 2 };
   assert.equal(transactionHash(ARC, PROOF, fields), "0x62a39124dcbdb23686e7f79b68aee371ef5b372da9fceedc57382b0657bc4609");

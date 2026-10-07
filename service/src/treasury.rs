@@ -21,7 +21,7 @@ use crate::canonical;
 use crate::members::Members;
 use crate::policy::{self, Policy, SoftRule};
 use crate::olien::{
-    self, address_of_signer_id, calldata, signer_id_of_address, signer_id_of_key, Call, IOlien, Init, OlienClient, PackedUserOperation,
+    self, address_of_signer_id, calldata, signer_id_of_address, signer_id_of_key, Call, IOlien, IOlienV2, Init, OlienClient, PackedUserOperation,
     SignerInput, SpendingLimitInput, Transaction, FLAG_UV_REQUIRED, KIND_CONTRACT, KIND_ECDSA, KIND_P256, KIND_WEBAUTHN,
     MAX_VALIDITY, PERM_APPROVE, PERM_RECOVER, PERM_VETO, SCHEDULE_WINDOW,
 };
@@ -1499,6 +1499,24 @@ fn decode_call(call: &Call, account: Address, usdc: Address, signers: &[SignerRo
             }),
             Some("setDelays") => IOlien::setDelaysCall::abi_decode(&call.data).ok().map(|c| {
                 format!("set delays: rule changes {}, recovery {}, co-signed recovery {}", human(c.configDelay.to::<u64>()), human(c.recoveryDelay.to::<u64>()), human(c.recoveryCoSignDelay.to::<u64>()))
+            }).or_else(|| IOlienV2::setDelaysCall::abi_decode(&call.data).ok().map(|c| {
+                let silence = if c.inactivityDelay.is_zero() { "no recovery after silence".to_string() } else { format!("one member may recover a key after {} of silence", human(c.inactivityDelay.to::<u64>())) };
+                format!("set delays: rule changes {}, recovery {}, co-signed recovery {}, {}", human(c.configDelay.to::<u64>()), human(c.recoveryDelay.to::<u64>()), human(c.recoveryCoSignDelay.to::<u64>()), silence)
+            })),
+            Some("setTransferPolicy") => IOlienV2::setTransferPolicyCall::abi_decode(&call.data).ok().map(|c| {
+                let p = c.p;
+                if p.tier == 0 && !p.requireKnown {
+                    return "clear the transfer policy: nothing waits".to_string();
+                }
+                let mut parts = Vec::new();
+                if p.tier != 0 { parts.push(format!("payments over {} of the token at {} wait {}", p.tier, addr(p.token), human(p.delay.to::<u64>()))); }
+                if p.requireKnown { parts.push(format!("payments to addresses this account does not know wait {}", human(p.delay.to::<u64>()))); }
+                if p.learn { parts.push("an address paid after a wait becomes known".to_string()); }
+                if !p.lockedUntil.is_zero() { parts.push(format!("loosening is refused until {}", p.lockedUntil)); }
+                format!("set the transfer policy: {}", parts.join("; "))
+            }),
+            Some("setKnown") => IOlienV2::setKnownCall::abi_decode(&call.data).ok().map(|c| {
+                format!("{} {}", if c.known { "know" } else { "forget" }, c.list.iter().map(|a| addr(*a)).collect::<Vec<_>>().join(", "))
             }),
             Some("setSpendingLimit") => IOlien::setSpendingLimitCall::abi_decode(&call.data).ok().map(|c| {
                 format!("set spending limit {}: {} USDC per {}{}", if c.id.is_zero() { "(new)".to_string() } else { c.id.to_string() }, format_usdc(U256::from(c.input.amount)), human(c.input.period.to::<u64>()), if c.input.anyDestination { ", any destination" } else { ", listed destinations only" })
@@ -1507,7 +1525,8 @@ fn decode_call(call: &Call, account: Address, usdc: Address, signers: &[SignerRo
             Some("allowLimitDestination") => IOlien::allowLimitDestinationCall::abi_decode(&call.data).ok().map(|c| format!("allow limit {} to pay {}", c.id, addr(c.to))),
             Some("removeSpendingLimit") => IOlien::removeSpendingLimitCall::abi_decode(&call.data).ok().map(|c| format!("remove spending limit {}", c.id)),
             Some("cancel") => IOlien::cancelCall::abi_decode(&call.data).ok().map(|c| format!("cancel proposal {}", hex(c.hash.as_slice()))),
-            Some("setImplementation") => IOlien::setImplementationCall::abi_decode(&call.data).ok().map(|c| format!("move to implementation {}", addr(c.newImplementation))),
+            Some("setImplementation") => IOlien::setImplementationCall::abi_decode(&call.data).ok().map(|c| format!("move to implementation {}", addr(c.newImplementation)))
+                .or_else(|| IOlienV2::setImplementationCall::abi_decode(&call.data).ok().map(|c| format!("move to implementation {}, whose code hashes to {}", addr(c.newImplementation), hex(c.codeHash.as_slice())))),
             Some("freezeImplementation") => Some("freeze the implementation forever".to_string()),
             _ => None,
         };
