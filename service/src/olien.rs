@@ -770,12 +770,14 @@ pub struct Gate {
 
 async fn gate_from(provider: &DynProvider, account: Address, lanes: &[U256]) -> Result<Gate> {
     let contract = IOlien::new(account, provider);
-    let config = contract.getConfig().call().await.map_err(describe)?;
-    let mut signers = contract.getSigners().call().await.map_err(describe)?;
+    // Three small reads; the limit is stated so that no endpoint, however it caps an
+    // eth_call, has a reason to refuse them.
+    let config = contract.getConfig().gas(2_000_000).call().await.map_err(describe)?;
+    let mut signers = contract.getSigners().gas(2_000_000).call().await.map_err(describe)?;
     signers.sort();
     let mut sequences = Vec::with_capacity(lanes.len());
     for lane in lanes {
-        let nonce = contract.getNonce(alloy::primitives::Uint::<192, 3>::from(*lane)).call().await.map_err(describe)?;
+        let nonce = contract.getNonce(alloy::primitives::Uint::<192, 3>::from(*lane)).gas(2_000_000).call().await.map_err(describe)?;
         sequences.push((nonce & U256::from(u64::MAX)).to::<u64>());
     }
     Ok(Gate { epoch: config.epoch, threshold: config.threshold, signers, sequences })
